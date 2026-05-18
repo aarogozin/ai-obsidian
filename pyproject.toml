@@ -1,0 +1,38 @@
+[project]
+name = "ai-obsidian"
+version = "0.1.0"
+description = "Local Apple Silicon CLI installer and assistant for Obsidian + oMLX."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "AI Obsidian contributors" },
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/aarogozin/ai-obsidian"
+Repository = "https://github.com/aarogozin/ai-obsidian"
+Issues = "https://github.com/aarogozin/ai-obsidian/issues"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+]
+release = [
+  "build>=1",
+]
+
+[project.scripts]
+ai-obsidian = "ai_obsidian.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.setuptools.package-data]
+ai_obsidian = ["resources/obsidian_companion/*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

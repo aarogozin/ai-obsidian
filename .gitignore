@@ -1,0 +1,73 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+
+# Build and release artifacts
+dist/
+build/
+release/
+*.egg-info/
+*.whl
+*.tar.gz
+pip-wheel-metadata/
+
+# Local installer/dev output
+.ai-obsidian/
+*.log
+*.tmp
+*.bak
+*.bak-*
+
+# Local secrets and machine config
+.env.local
+.env.*.local
+*.secret
+*.secrets
+config/local*.json
+config/*.local.json
+!config/models.json
+
+# macOS and editor files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Tooling
+.hypothesis/
+.ipynb_checkpoints/
+
+# Local AI-agent working files and planning scratchpads
+AGENTS.md
+CLAUDE.md
+PROJECT_PLAN.md
+.agents/
+.claude/
+.codex/
+PROMPTS.md
+PROMPT_LOG.md
+*_PROMPTS.md
+*_PROMPT_LOG.md
+*_SCRATCH.md
+*_scratch.md

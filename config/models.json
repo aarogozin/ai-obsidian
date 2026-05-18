@@ -1,0 +1,48 @@
+{
+  "profiles": [
+    {
+      "id": "fast-small",
+      "label": "Fast small model",
+      "min_ram_gb": 16,
+      "purpose": "Quick note cleanup, summaries, and short chat sessions.",
+      "models": [
+        {
+          "repo_id": "mlx-community/Qwen3.5-2B-OptiQ-4bit",
+          "label": "Qwen 3.5 2B OptiQ 4-bit"
+        },
+        {
+          "repo_id": "mlx-community/gemma-4-e2b-it-OptiQ-4bit",
+          "label": "Gemma 4 E2B IT OptiQ 4-bit"
+        }
+      ]
+    },
+    {
+      "id": "balanced",
+      "label": "Balanced assistant",
+      "min_ram_gb": 32,
+      "purpose": "Default profile for meeting notes and vault editing.",
+      "models": [
+        {
+          "repo_id": "mlx-community/Qwen3.5-9B-OptiQ-4bit",
+          "label": "Qwen 3.5 9B OptiQ 4-bit"
+        },
+        {
+          "repo_id": "mlx-community/gemma-4-e4b-it-OptiQ-4bit",
+          "label": "Gemma 4 E4B IT OptiQ 4-bit"
+        }
+      ]
+    },
+    {
+      "id": "large",
+      "label": "Large reasoning model",
+      "min_ram_gb": 64,
+      "purpose": "Longer context and stronger reasoning when memory allows.",
+      "models": [
+        {
+          "repo_id": "mlx-community/Qwen3-Coder-Next-4bit",
+          "label": "Qwen3 Coder Next 4-bit"
+        }
+      ]
+    }
+  ]
+}

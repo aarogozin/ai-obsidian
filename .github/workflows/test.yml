@@ -1,0 +1,45 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    name: Python tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+      - name: Run tests
+        run: python -m pytest -q
+
+  installer-smoke:
+    name: Installer smoke
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bash syntax
+        run: bash -n scripts/install.sh
+      - name: Dry run
+        env:
+          AI_OBSIDIAN_TEST_UNAME_S: Darwin
+          AI_OBSIDIAN_TEST_UNAME_M: arm64
+          AI_OBSIDIAN_TEST_MACOS_VERSION: "15.0"
+        run: |
+          scripts/install.sh --dry-run --yes --no-init \
+            --source-dir "$PWD" \
+            --install-dir "$RUNNER_TEMP/ai-obsidian" \
+            --bin-dir "$RUNNER_TEMP/bin"
