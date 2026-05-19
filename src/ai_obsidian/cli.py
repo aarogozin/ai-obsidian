@@ -17,19 +17,24 @@ from .chat import run_builtin_chat, run_external_chat
 from .chat_providers import external_engine_statuses
 from .installer import (
     DEFAULT_VAULTS_ROOT,
+    DEFAULT_MODEL_DIR,
+    MODEL_SEARCHES_BY_FAMILY,
+    DownloadedMlxModel,
     ask_yes_no,
     ask_choice,
     ask_path,
     ask_text,
     allowed_size_buckets_for_memory,
     choose_model,
+    discover_downloaded_mlx_models,
     discover_model_dir_candidates,
+    model_dir_stats,
     download_model_repo,
     model_dir_label,
     run_init,
     system_memory_gb,
 )
-from .model_catalog import load_model_choices, size_bucket_for_model
+from .model_catalog import ModelChoice, load_model_choices, model_version, size_bucket_for_model
 from .obsidian_plugin import (
     COMPANION_PLUGIN_ID,
     DEFAULT_PLUGIN_ID,
@@ -46,7 +51,7 @@ from .obsidian_plugin import (
     verify_plugin_with_config,
 )
 from .omlx import OmlxClient, OmlxError, resolve_model_id
-from .prerequisites import ensure_prerequisites, is_supported_macos
+from .prerequisites import check_prerequisites, ensure_hermes_cli_installed, ensure_prerequisites, is_supported_macos
 from .soul import create_soul, read_soul, soul_path, soul_status
 from .voice import DEFAULT_STT_MODEL, VALID_LANGUAGES, transcribe_audio
 
@@ -107,10 +112,31 @@ def build_parser() -> argparse.ArgumentParser:
     repair.add_argument("--yes", action="store_true", help="Apply safe repairs without prompting.")
     repair.set_defaults(func=cmd_repair, interactive=True)
 
+    setup = subparsers.add_parser("setup", help="Machine-readable setup API for the macOS installer UI.")
+    setup_sub = setup.add_subparsers(required=True)
+    setup_status = setup_sub.add_parser("status", help="Print setup readiness and current configuration.")
+    setup_status.add_argument("--json", action="store_true", help="Print machine-readable setup status.")
+    setup_status.set_defaults(func=cmd_setup_status)
+    setup_models = setup_sub.add_parser("models", help="Print local and safe remote model choices.")
+    setup_models.add_argument("--json", action="store_true", help="Print machine-readable model choices.")
+    setup_models.add_argument("--offline", action="store_true", help="Use bundled fallback models only.")
+    setup_models.add_argument("--family", choices=["qwen", "gemma", "llama", "mistral", "granite", "other", "local"])
+    setup_models.add_argument("--version", help="Filter remote suggestions by parsed model version.")
+    setup_models.add_argument("--size", choices=["small", "balanced", "large"], help="Filter remote suggestions by size bucket.")
+    setup_models.add_argument("--model-dir", help="Additional model directory to inspect first.")
+    setup_models.set_defaults(func=cmd_setup_models)
+    setup_apply = setup_sub.add_parser("apply", help="Apply a setup profile produced by the macOS installer UI.")
+    setup_apply.add_argument("--profile", required=True, help="Path to a JSON setup profile.")
+    setup_apply.add_argument("--yes", action="store_true", help="Apply safe setup changes without prompting.")
+    setup_apply.add_argument("--dry-run", action="store_true", help="Validate and print the planned setup without changing files.")
+    setup_apply.set_defaults(func=cmd_setup_apply)
+
     install = subparsers.add_parser("install", help="Install or plan the local stack.")
     install.add_argument("--dry-run", action="store_true", help="Show actions without changing the system.")
     install.add_argument("--execute", action="store_true", help="Run supported install actions.")
     install.add_argument("--yes", action="store_true", help="Allow non-interactive bootstrap actions such as Homebrew install.")
+    install.add_argument("--with-hermes", action="store_true", help="Also install the optional Hermes Agent CLI.")
+    install.add_argument("--only-hermes", action="store_true", help="Install only the optional Hermes Agent CLI.")
     install.set_defaults(func=cmd_install)
 
     service = subparsers.add_parser("service", help="Manage the oMLX service.")
@@ -194,9 +220,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cmd_menu(_: argparse.Namespace) -> int:
-    print("AI Obsidian")
-    print("Choose what you want to do. Press Enter for the recommended next step.\n")
-    options = [
+    last_status = 0
+    while True:
+        print("\nAI Obsidian")
+        print("Choose what you want to do. Press Enter for the recommended next step.\n")
+        choice = ask_choice("Main menu", main_menu_options(), default=0)
+        if choice == "quit":
+            return last_status
+        last_status = run_menu_choice(choice)
+        print(f"\nCommand finished with exit code {last_status}.")
+        if not ask_yes_no("Return to the main menu?", default=True):
+            return last_status
+
+
+def main_menu_options() -> list[tuple[str, str]]:
+    return [
         ("start", "Start / open AI Obsidian workspace"),
         ("init", "Init / repair setup"),
         ("vault", "Choose default vault"),
@@ -210,7 +248,9 @@ def cmd_menu(_: argparse.Namespace) -> int:
         ("chat", "CLI chat fallback"),
         ("quit", "Quit"),
     ]
-    choice = ask_choice("Main menu", options, default=0)
+
+
+def run_menu_choice(choice: str) -> int:
     if choice == "start":
         status = cmd_stack_start(argparse.Namespace(vault=None, interactive=True))
         if status == 0:
@@ -293,6 +333,112 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if health.get("ok") else 1
 
 
+def cmd_setup_status(args: argparse.Namespace) -> int:
+    status = collect_setup_status()
+    if getattr(args, "json", False):
+        print(json.dumps(status, indent=2))
+        return 0 if status.get("platform_ok") else 1
+
+    print("AI Obsidian setup status")
+    prereq = status["prerequisites"]
+    print(f"Platform: {status['platform']['system']} {status['platform']['macos']} / {status['platform']['machine']}")
+    print(f"Homebrew: {prereq.get('brew_path') or 'missing'}")
+    print(f"Obsidian: {'installed' if prereq.get('obsidian_installed') else 'missing'}")
+    print(f"oMLX: {'installed' if prereq.get('omlx_installed') else 'missing'}")
+    print(f"Hugging Face CLI: {prereq.get('hf_cli_path') or 'missing'}")
+    print(f"ffmpeg: {prereq.get('ffmpeg_path') or 'missing'}")
+    print(f"mlx-whisper: {'available' if prereq.get('mlx_whisper_available') else 'missing'}")
+    print(f"Registered vaults: {len(status['vaults'])}")
+    print(f"Downloaded/local models: {len(status['downloaded_models'])}")
+    return 0 if status.get("platform_ok") else 1
+
+
+def cmd_setup_models(args: argparse.Namespace) -> int:
+    payload = collect_setup_models(
+        load_remote_models=not getattr(args, "offline", False),
+        family=getattr(args, "family", None),
+        version=getattr(args, "version", None),
+        size=getattr(args, "size", None),
+        model_dir=Path(args.model_dir).expanduser() if getattr(args, "model_dir", None) else None,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print("Downloaded/local models:")
+    for model in payload["downloaded"]:
+        print(f"- {model['id']} | {model['format']} | {model['source']} | {model['path']}")
+    print(f"\nRemote Apple Silicon MLX suggestions ({payload['remote_source']}):")
+    for model in payload["remote"]:
+        print(f"- {model['repo_id']} | {model['family']} {model['version']} | {model['size_bucket']} | {model['min_ram_gb']} GB+")
+    return 0
+
+
+def cmd_setup_apply(args: argparse.Namespace) -> int:
+    profile_path = Path(args.profile).expanduser()
+    try:
+        profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"Could not read setup profile: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        plan = normalize_setup_profile(profile)
+    except ValueError as exc:
+        print(f"Invalid setup profile: {exc}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        print(json.dumps({"dry_run": True, "plan": plan}, indent=2))
+        return 0
+
+    if not args.yes:
+        print("Refusing to apply a GUI setup profile without --yes.")
+        return 2
+
+    vault_path = Path(plan["vault"]["path"])
+    if plan["vault"]["mode"] == "existing" and (not vault_path.exists() or not vault_path.is_dir()):
+        print(f"Existing vault path does not exist: {vault_path}", file=sys.stderr)
+        return 1
+
+    prerequisite_status = ensure_prerequisites(
+        interactive=False,
+        start_omlx_service=False,
+        allow_homebrew_install=True,
+    )
+    if prerequisite_status != 0:
+        return prerequisite_status
+
+    config = merge_config(load_config(), config_from_setup_plan(plan))
+    if plan["vault"]["mode"] == "create":
+        vault_path.mkdir(parents=True, exist_ok=True)
+        (vault_path / ".obsidian").mkdir(exist_ok=True)
+
+    created_soul = create_soul(vault_path)
+    if created_soul:
+        print(f"Created vault instructions: {soul_path(vault_path)}")
+
+    save_config(config)
+    print(f"Saved configuration: {config_path()}")
+
+    if plan["plugins"]["install_hub"]:
+        status = ensure_plugin_ready(vault_path, config, plugin_id=DEFAULT_PLUGIN_ID, yes=True)
+        if status != 0:
+            return status
+    if plan["plugins"]["install_companion"]:
+        status = ensure_plugin_ready(vault_path, config, plugin_id=COMPANION_PLUGIN_ID, yes=True)
+        if status != 0:
+            return status
+
+    if plan["launch"]["start_stack"]:
+        status = cmd_stack_start(argparse.Namespace(vault=plan["vault"]["name"], interactive=False))
+        if status != 0:
+            return status
+    if plan["launch"]["open_obsidian"]:
+        return open_obsidian_vault(vault_path)
+    return 0
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     status, config = run_init(load_remote_models=not args.offline)
     if config is None:
@@ -332,19 +478,32 @@ def cmd_install(args: argparse.Namespace) -> int:
         print("Use --dry-run to preview or --execute to run supported install actions.")
         return 2
 
-    steps = [
-        "Check Apple Silicon and macOS version.",
-        "Install Homebrew if missing, or use the existing brew.",
-        "Install Obsidian through Homebrew Cask.",
-        "Tap and install oMLX from jundot/omlx.",
-        "Install ffmpeg and mlx-whisper for local push-to-talk transcription.",
-        "Configure oMLX model directory.",
-        "Select an Apple Silicon MLX model.",
-        "Create or register an Obsidian vault.",
-        "Install and configure the Obsidian AI plugin and push-to-talk companion plugin.",
-        "Save configuration.",
-        "Run `stack start` to download the model if needed, start oMLX, and open Obsidian.",
-    ]
+    with_hermes = getattr(args, "with_hermes", False)
+    only_hermes = getattr(args, "only_hermes", False)
+
+    steps = []
+    if not only_hermes:
+        steps.extend(
+            [
+                "Check Apple Silicon and macOS version.",
+                "Install Homebrew if missing, or use the existing brew.",
+                "Install Obsidian through Homebrew Cask.",
+                "Tap and install oMLX from jundot/omlx.",
+                "Install Hugging Face CLI for model lookup/downloads.",
+                "Install ffmpeg and mlx-whisper for local push-to-talk transcription.",
+                "Configure oMLX model directory.",
+                "Select an Apple Silicon MLX model.",
+                "Create or register an Obsidian vault.",
+                "Install and configure the Obsidian AI plugin and push-to-talk companion plugin.",
+                "Save configuration.",
+                "Run `stack start` to download the model if needed, start oMLX, and open Obsidian.",
+            ]
+        )
+    if with_hermes or only_hermes:
+        steps.append("Install optional Hermes Agent CLI using the official NousResearch installer.")
+        steps.append("Run `hermes setup` later if Hermes needs provider/API-key configuration.")
+    if not with_hermes and not only_hermes:
+        steps.append("Detect optional Hermes/Claude Code terminal engines if they are already installed.")
 
     if args.dry_run:
         print("Install plan:")
@@ -352,14 +511,22 @@ def cmd_install(args: argparse.Namespace) -> int:
             print(f"{index}. {step}")
         return 0
 
-    status = ensure_prerequisites(
-        interactive=False,
-        start_omlx_service=True,
-        allow_homebrew_install=args.yes,
-    )
-    if status != 0:
-        return status
-    print("Base installation attempted. Run `ai-obsidian init` to configure models, vaults, and chat.")
+    if not only_hermes:
+        status = ensure_prerequisites(
+            interactive=False,
+            start_omlx_service=True,
+            allow_homebrew_install=args.yes,
+        )
+        if status != 0:
+            return status
+    if with_hermes or only_hermes:
+        status = ensure_hermes_cli_installed(allow_install=args.yes)
+        if status != 0:
+            return status
+    if only_hermes:
+        print("Hermes installation attempted. Run `hermes setup` if provider configuration is needed.")
+    else:
+        print("Base installation attempted. Run `ai-obsidian init` to configure models, vaults, and chat.")
     return 0
 
 
@@ -717,6 +884,242 @@ def repair_served_model_id(config: dict[str, Any]) -> dict[str, Any]:
         save_config(config)
         print(f"Repaired configured model id: {selected} -> {resolved}")
     return config
+
+
+def collect_setup_status() -> dict[str, Any]:
+    prerequisites = check_prerequisites()
+    config = load_config()
+    vaults = []
+    for name, vault in config.get("vaults", {}).items():
+        path = Path(vault.get("path", "")).expanduser()
+        vaults.append(
+            {
+                "name": name,
+                "path": str(path),
+                "exists": path.exists() and path.is_dir(),
+                "is_default": name == config.get("default_vault"),
+            }
+        )
+
+    model_dirs = []
+    for candidate in discover_model_dir_candidates():
+        stats = model_dir_stats(candidate.path) if candidate.path else {"mlx_models": 0, "gguf_files": 0}
+        model_dirs.append(
+            {
+                "id": candidate.id,
+                "label": candidate.label,
+                "path": str(candidate.path.expanduser()) if candidate.path else None,
+                "exists": bool(candidate.path and candidate.path.expanduser().exists()),
+                "compatible": candidate.compatible,
+                "note": candidate.note,
+                **stats,
+            }
+        )
+
+    return {
+        "platform": {
+            "system": platform.system(),
+            "machine": platform.machine(),
+            "macos": platform.mac_ver()[0] or "unknown",
+            "memory_gb": system_memory_gb(),
+        },
+        "platform_ok": prerequisites.arch_ok and prerequisites.macos_ok,
+        "prerequisites": asdict(prerequisites),
+        "runtime": collect_setup_runtime(config),
+        "config": sanitized_config(config),
+        "vaults": vaults,
+        "model_dirs": model_dirs,
+        "downloaded_models": [downloaded_model_to_json(model) for model in discover_downloaded_models()],
+        "external_engines": external_engine_statuses(),
+    }
+
+
+def collect_setup_runtime(config: dict[str, Any]) -> dict[str, Any]:
+    omlx = config.get("omlx", {})
+    base_url = omlx.get("base_url", DEFAULT_OMLX_BASE_URL)
+    selected = omlx.get("selected_model")
+    client = OmlxClient(
+        base_url=base_url,
+        api_key=omlx.get("api_key") or os.environ.get("OMLX_API_KEY"),
+    )
+    served_models, error = list_models_if_reachable(client)
+    return {
+        "omlx": {
+            "base_url": base_url,
+            "configured_model": selected,
+            "reachable": served_models is not None,
+            "served_models": served_models or [],
+            "model_visible": bool(served_models and selected and any(model_matches(selected, model) for model in served_models)),
+            "error": str(error) if error else None,
+        }
+    }
+
+
+def collect_setup_models(
+    *,
+    load_remote_models: bool,
+    family: str | None,
+    version: str | None,
+    size: str | None,
+    model_dir: Path | None,
+) -> dict[str, Any]:
+    remote_choices, source = load_model_choices(
+        load_remote_models,
+        searches=MODEL_SEARCHES_BY_FAMILY.get(family) if family else None,
+    )
+    allowed_buckets = allowed_size_buckets_for_memory(system_memory_gb())
+    filtered_remote = []
+    for choice in remote_choices:
+        bucket = size_bucket_for_model(choice)
+        parsed_version = model_version(choice.repo_id)
+        if bucket not in allowed_buckets:
+            continue
+        if family and choice.family != family:
+            continue
+        if version and parsed_version != version:
+            continue
+        if size and bucket != size:
+            continue
+        filtered_remote.append(model_choice_to_json(choice))
+
+    downloaded = [downloaded_model_to_json(model) for model in discover_downloaded_models()]
+    if model_dir is not None:
+        configured = [
+            downloaded_mlx_model_to_json(model)
+            for model in discover_downloaded_mlx_models(model_dir)
+            if not any(existing["path"] == str(model.path) for existing in downloaded)
+        ]
+        downloaded = configured + downloaded
+
+    return {
+        "memory_gb": system_memory_gb(),
+        "allowed_size_buckets": allowed_buckets,
+        "downloaded": downloaded,
+        "remote_source": source,
+        "remote": filtered_remote[:50],
+    }
+
+
+def normalize_setup_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(profile, dict):
+        raise ValueError("profile must be a JSON object")
+
+    omlx = profile.get("omlx") if isinstance(profile.get("omlx"), dict) else {}
+    vault = profile.get("vault") if isinstance(profile.get("vault"), dict) else {}
+    chat = profile.get("chat") if isinstance(profile.get("chat"), dict) else {}
+    plugins = profile.get("plugins") if isinstance(profile.get("plugins"), dict) else {}
+    launch = profile.get("launch") if isinstance(profile.get("launch"), dict) else {}
+
+    vault_path_value = vault.get("path")
+    if not isinstance(vault_path_value, str) or not vault_path_value.strip():
+        raise ValueError("vault.path is required")
+    vault_path = Path(vault_path_value).expanduser().resolve()
+    vault_name = vault.get("name") if isinstance(vault.get("name"), str) and vault.get("name").strip() else vault_path.name
+    vault_mode = vault.get("mode", "create")
+    if vault_mode not in {"create", "existing"}:
+        raise ValueError("vault.mode must be create or existing")
+
+    selected_model = omlx.get("selected_model")
+    if not isinstance(selected_model, str) or not selected_model.strip():
+        raise ValueError("omlx.selected_model is required")
+    model_dir_value = omlx.get("model_dir") or str(DEFAULT_MODEL_DIR)
+    if not isinstance(model_dir_value, str):
+        raise ValueError("omlx.model_dir must be a path string")
+    mode = omlx.get("mode", "service")
+    if mode not in {"service", "manual", "menubar"}:
+        raise ValueError("omlx.mode must be service, manual, or menubar")
+
+    chat_engine = chat.get("default_engine", "builtin")
+    if chat_engine not in {"builtin", "hermes", "claude"}:
+        raise ValueError("chat.default_engine must be builtin, hermes, or claude")
+
+    return {
+        "omlx": {
+            "mode": mode,
+            "base_url": str(omlx.get("base_url") or DEFAULT_OMLX_BASE_URL),
+            "api_key": str(omlx.get("api_key") or ""),
+            "model_dir": str(Path(model_dir_value).expanduser().resolve()),
+            "selected_model": selected_model.strip(),
+        },
+        "vault": {
+            "mode": vault_mode,
+            "name": vault_name.strip(),
+            "path": str(vault_path),
+        },
+        "chat": {
+            "default_engine": chat_engine,
+        },
+        "plugins": {
+            "install_hub": bool(plugins.get("install_hub", True)),
+            "install_companion": bool(plugins.get("install_companion", True)),
+        },
+        "launch": {
+            "start_stack": bool(launch.get("start_stack", True)),
+            "open_obsidian": bool(launch.get("open_obsidian", True)),
+        },
+    }
+
+
+def config_from_setup_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    vault = plan["vault"]
+    omlx = dict(plan["omlx"])
+    if not omlx.get("api_key"):
+        omlx.pop("api_key", None)
+    return {
+        "omlx": omlx,
+        "vaults_root": str(Path(vault["path"]).parent),
+        "default_vault": vault["name"],
+        "vaults": {
+            vault["name"]: {
+                "name": vault["name"],
+                "path": vault["path"],
+            }
+        },
+        "chat": plan["chat"],
+    }
+
+
+def sanitized_config(config: dict[str, Any]) -> dict[str, Any]:
+    sanitized = json.loads(json.dumps(config))
+    omlx = sanitized.get("omlx")
+    if isinstance(omlx, dict) and "api_key" in omlx:
+        omlx["api_key_configured"] = bool(omlx.get("api_key"))
+        omlx["api_key"] = ""
+    return sanitized
+
+
+def downloaded_model_to_json(model: DownloadedModel) -> dict[str, Any]:
+    return {
+        "id": model.id,
+        "source": model.source,
+        "format": model.format,
+        "path": str(model.path),
+        "size_bytes": model.size_bytes,
+        "note": model.note,
+    }
+
+
+def downloaded_mlx_model_to_json(model: DownloadedMlxModel) -> dict[str, Any]:
+    return {
+        "id": model.id,
+        "source": model.source,
+        "format": "MLX",
+        "path": str(model.path),
+        "size_bytes": model.size_bytes,
+        "note": f"{model.safetensor_count} safetensors",
+    }
+
+
+def model_choice_to_json(choice: Any) -> dict[str, Any]:
+    return {
+        "repo_id": choice.repo_id,
+        "label": choice.label,
+        "min_ram_gb": choice.min_ram_gb,
+        "family": choice.family,
+        "version": model_version(choice.repo_id),
+        "size_bucket": size_bucket_for_model(choice),
+        "note": choice.note,
+    }
 
 
 def collect_health() -> dict[str, Any]:

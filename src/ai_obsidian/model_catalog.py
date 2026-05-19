@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from http.client import IncompleteRead
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -62,7 +63,10 @@ def fetch_huggingface_payload(searches: tuple[str, ...] | None = None) -> list[d
     )
 
     for query in queries:
-        payload.extend(fetch_huggingface_query(query))
+        try:
+            payload.extend(fetch_huggingface_query(query))
+        except (OSError, TimeoutError, IncompleteRead, json.JSONDecodeError, UnicodeDecodeError):
+            continue
     return dedupe_hf_items(payload)
 
 
@@ -71,7 +75,7 @@ def fetch_huggingface_query(query: dict[str, str]) -> list[dict[str, Any]]:
     try:
         with urlopen(url, timeout=8) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, TimeoutError, json.JSONDecodeError):
+    except (OSError, TimeoutError, IncompleteRead, json.JSONDecodeError, UnicodeDecodeError):
         return []
     return payload if isinstance(payload, list) else []
 

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install.sh"
+MACOS_INSTALLER_BUILDER = ROOT / "scripts" / "build-macos-installer.sh"
 
 
 def installer_env(tmp_path: Path, extra_path: str | None = None) -> dict[str, str]:
@@ -23,6 +25,12 @@ def installer_env(tmp_path: Path, extra_path: str | None = None) -> dict[str, st
 
 def test_install_script_has_valid_bash_syntax():
     result = subprocess.run(["bash", "-n", str(INSTALLER)], check=False)
+
+    assert result.returncode == 0
+
+
+def test_macos_installer_builder_has_valid_bash_syntax():
+    result = subprocess.run(["bash", "-n", str(MACOS_INSTALLER_BUILDER)], check=False)
 
     assert result.returncode == 0
 
@@ -60,7 +68,7 @@ def test_install_script_local_source_install_writes_path_shim(tmp_path):
     stub_dir = tmp_path / "stubs"
     stub_dir.mkdir()
     brew = stub_dir / "brew"
-    brew.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    brew.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
     brew.chmod(0o755)
     env = installer_env(tmp_path, extra_path=f"{stub_dir}:{os.environ.get('PATH', '')}")
     install_dir = tmp_path / "install"
@@ -93,3 +101,103 @@ def test_install_script_local_source_install_writes_path_shim(tmp_path):
     help_result = subprocess.run([str(shim), "--help"], text=True, capture_output=True, check=False)
     assert help_result.returncode == 0
     assert "Install and operate a local Obsidian" in help_result.stdout
+
+
+def test_install_script_archive_install_uses_bundled_backend(tmp_path):
+    stub_dir = tmp_path / "stubs"
+    stub_dir.mkdir()
+    brew = stub_dir / "brew"
+    brew.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    brew.chmod(0o755)
+    subprocess.run(
+        [
+            "tar",
+            "-czf",
+            str(tmp_path / "ai-obsidian-bundled.tar.gz"),
+            "--exclude",
+            ".git",
+            "--exclude",
+            ".venv",
+            "--exclude",
+            "build",
+            "--exclude",
+            "release",
+            "--exclude",
+            ".pytest_cache",
+            "-C",
+            str(ROOT.parent),
+            ROOT.name,
+        ],
+        check=True,
+    )
+    archive = tmp_path / "ai-obsidian-bundled.tar.gz"
+    env = installer_env(tmp_path, extra_path=f"{stub_dir}:{os.environ.get('PATH', '')}")
+    install_dir = tmp_path / "install"
+    bin_dir = tmp_path / "bin"
+
+    result = subprocess.run(
+        [
+            str(INSTALLER),
+            "--yes",
+            "--no-init",
+            "--archive",
+            str(archive),
+            "--install-dir",
+            str(install_dir),
+            "--bin-dir",
+            str(bin_dir),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Installing from bundled source archive" in result.stdout
+    help_result = subprocess.run([str(bin_dir / "ai-obsidian"), "--help"], text=True, capture_output=True, check=False)
+    assert help_result.returncode == 0
+    assert "setup" in help_result.stdout
+
+
+def test_install_script_finds_homebrew_python_when_gui_path_hides_python3(tmp_path):
+    stub_dir = tmp_path / "stubs"
+    stub_dir.mkdir()
+    brew = stub_dir / "brew"
+    brew.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+    brew.chmod(0o755)
+    python = stub_dir / "homebrew-python3"
+    python.write_text(
+        "#!/bin/bash\nexec " + sys.executable + ' "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    env = installer_env(tmp_path, extra_path=str(stub_dir))
+    env["AI_OBSIDIAN_TEST_HOMEBREW_PYTHON"] = str(python)
+    install_dir = tmp_path / "install"
+    bin_dir = tmp_path / "bin"
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(INSTALLER),
+            "--dry-run",
+            "--yes",
+            "--no-init",
+            "--source-dir",
+            str(ROOT),
+            "--install-dir",
+            str(install_dir),
+            "--bin-dir",
+            str(bin_dir),
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"Python: {python}" in result.stdout
+    assert "Python 3.10+ is missing or too old" not in result.stdout

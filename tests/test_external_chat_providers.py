@@ -15,7 +15,7 @@ from ai_obsidian.chat_providers import (
 
 
 def test_hermes_adapter_builds_oneshot_command(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda name: f"/bin/{name}" if name == "hermes" else None)
+    monkeypatch.setattr("ai_obsidian.chat_providers.find_executable", lambda name: f"/bin/{name}" if name == "hermes" else None)
 
     invocation = build_provider_invocation("hermes", "summarize")
 
@@ -24,7 +24,7 @@ def test_hermes_adapter_builds_oneshot_command(monkeypatch):
 
 
 def test_claude_adapter_builds_read_only_print_command(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda name: f"/bin/{name}" if name == "claude" else None)
+    monkeypatch.setattr("ai_obsidian.chat_providers.find_executable", lambda name: f"/bin/{name}" if name == "claude" else None)
 
     invocation = build_provider_invocation("claude", "summarize")
 
@@ -41,7 +41,7 @@ def test_claude_adapter_builds_read_only_print_command(monkeypatch):
 
 
 def test_missing_external_executable_returns_actionable_status(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.setattr("ai_obsidian.chat_providers.find_executable", lambda _name: None)
 
     status = external_engine_status("hermes")
 
@@ -50,7 +50,7 @@ def test_missing_external_executable_returns_actionable_status(monkeypatch):
 
 
 def test_missing_external_executable_raises_actionable_error(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda _name: None)
+    monkeypatch.setattr("ai_obsidian.chat_providers.find_executable", lambda _name: None)
 
     try:
         ask_external_provider("claude", "hello")
@@ -61,7 +61,7 @@ def test_missing_external_executable_raises_actionable_error(monkeypatch):
 
 
 def test_external_provider_nonzero_exit_is_concise(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ai_obsidian.chat_providers.find_executable", lambda name: f"/bin/{name}")
 
     def fake_run(*_args, **_kwargs):
         return subprocess.CompletedProcess(
@@ -85,7 +85,7 @@ def test_external_provider_nonzero_exit_is_concise(monkeypatch):
 
 
 def test_external_provider_runs_outside_caller_working_directory(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr("ai_obsidian.chat_providers.find_executable", lambda name: f"/bin/{name}")
     seen_kwargs: dict[str, object] = {}
 
     def fake_run(*_args, **kwargs):
@@ -176,7 +176,7 @@ def test_cli_routes_hermes_chat_to_external_provider(tmp_path, monkeypatch):
 
 
 def test_doctor_json_includes_external_engine_status(monkeypatch):
-    monkeypatch.setattr("shutil.which", lambda name: f"/bin/{name}" if name == "hermes" else None)
+    monkeypatch.setattr("ai_obsidian.chat_providers.find_executable", lambda name: f"/bin/{name}" if name == "hermes" else None)
     monkeypatch.setattr(cli, "load_config", lambda: {})
     monkeypatch.setattr(cli, "list_models_if_reachable", lambda _client: (None, RuntimeError("offline")))
 

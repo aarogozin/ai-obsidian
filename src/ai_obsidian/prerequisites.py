@@ -50,6 +50,24 @@ def find_hf_cli() -> str | None:
     return None
 
 
+def find_executable(name: str, extra_paths: list[Path] | None = None) -> str | None:
+    path = shutil.which(name)
+    if path:
+        return path
+    candidates = list(extra_paths or [])
+    candidates.extend(
+        [
+            Path.home() / ".local" / "bin" / name,
+            Path("/opt/homebrew/bin") / name,
+            Path("/usr/local/bin") / name,
+        ]
+    )
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def ensure_prerequisites(
     *,
     interactive: bool,
@@ -198,6 +216,36 @@ def install_huggingface_cli() -> int:
 def install_mlx_whisper() -> int:
     command = [sys.executable, "-m", "pip", "install", "mlx-whisper"]
     return run_command(command)
+
+
+def ensure_hermes_cli_installed(*, allow_install: bool) -> int:
+    existing = find_executable("hermes")
+    if existing:
+        print(f"Hermes CLI is already available: {existing}")
+        return 0
+    if not allow_install:
+        print("Hermes CLI is optional and not installed.")
+        print("Install it explicitly with: ai-obsidian install --execute --yes --only-hermes")
+        return 1
+    return install_hermes_cli()
+
+
+def install_hermes_cli() -> int:
+    command = [
+        "/bin/bash",
+        "-c",
+        "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+    ]
+    status = run_command(command)
+    if status != 0:
+        return status
+    hermes = find_executable("hermes")
+    if hermes:
+        print(f"Hermes CLI installed: {hermes}")
+        return 0
+    print("Hermes installer finished, but `hermes` was not found on PATH.")
+    print("If it was installed into ~/.local/bin, open a new terminal or add ~/.local/bin to PATH.")
+    return 1
 
 
 def has_mlx_whisper() -> bool:

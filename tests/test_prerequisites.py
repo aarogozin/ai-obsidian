@@ -170,3 +170,41 @@ def test_find_hf_cli_checks_current_python_bin(tmp_path, monkeypatch):
     monkeypatch.setattr(prerequisites.sys, "executable", str(python_bin / "python"))
 
     assert prerequisites.find_hf_cli() == str(hf)
+
+
+def test_find_executable_checks_common_gui_hidden_paths(tmp_path, monkeypatch):
+    hermes = tmp_path / ".local" / "bin" / "hermes"
+    hermes.parent.mkdir(parents=True)
+    hermes.write_text("#!/bin/sh\n", encoding="utf-8")
+    hermes.chmod(0o755)
+    monkeypatch.setattr(prerequisites.shutil, "which", lambda name: None)
+    monkeypatch.setattr(prerequisites.Path, "home", classmethod(lambda cls: tmp_path))
+
+    assert prerequisites.find_executable("hermes") == str(hermes)
+
+
+def test_ensure_hermes_cli_installed_uses_official_installer_when_allowed(monkeypatch):
+    commands: list[list[str]] = []
+    installed = {"done": False}
+
+    def fake_find(name: str):
+        return "hermes" if installed["done"] else None
+
+    def fake_run(command, env=None):
+        commands.append(command)
+        installed["done"] = True
+        return 0
+
+    monkeypatch.setattr(prerequisites, "find_executable", fake_find)
+    monkeypatch.setattr(prerequisites, "run_command", fake_run)
+
+    status = prerequisites.ensure_hermes_cli_installed(allow_install=True)
+
+    assert status == 0
+    assert commands == [
+        [
+            "/bin/bash",
+            "-c",
+            "curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash",
+        ]
+    ]

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+
+from .prerequisites import find_executable
 
 
 SUPPORTED_EXTERNAL_ENGINES = {"hermes", "claude"}
@@ -38,7 +39,7 @@ def external_engine_status(engine: str) -> ExternalEngineStatus:
             detail="adapter is not implemented",
         )
 
-    executable = shutil.which(engine)
+    executable = find_executable(engine)
     if executable:
         return ExternalEngineStatus(
             engine=engine,
@@ -96,7 +97,7 @@ def ask_external_provider(engine: str, prompt: str, timeout_seconds: int = DEFAU
 
 
 def build_provider_invocation(engine: str, prompt: str) -> ProviderInvocation:
-    executable = shutil.which(engine)
+    executable = find_executable(engine)
     if not executable:
         raise ExternalProviderError(missing_executable_message(engine))
 

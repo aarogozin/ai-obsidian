@@ -1,0 +1,24 @@
+{
+  "omlx": {
+    "mode": "service",
+    "api_key": "test-key",
+    "model_dir": "/tmp/ai-obsidian-models",
+    "selected_model": "mlx-community/Qwen3-1.7B-4bit"
+  },
+  "vault": {
+    "mode": "create",
+    "name": "Main",
+    "path": "/tmp/ai-obsidian-vaults/Main"
+  },
+  "chat": {
+    "default_engine": "builtin"
+  },
+  "plugins": {
+    "install_hub": false,
+    "install_companion": false
+  },
+  "launch": {
+    "start_stack": false,
+    "open_obsidian": false
+  }
+}

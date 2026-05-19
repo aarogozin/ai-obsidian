@@ -32,7 +32,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Bash syntax
-        run: bash -n scripts/install.sh
+        run: |
+          bash -n scripts/install.sh
+          bash -n scripts/build-macos-installer.sh
       - name: Dry run
         env:
           AI_OBSIDIAN_TEST_UNAME_S: Darwin
@@ -43,3 +45,5 @@ jobs:
             --source-dir "$PWD" \
             --install-dir "$RUNNER_TEMP/ai-obsidian" \
             --bin-dir "$RUNNER_TEMP/bin"
+      - name: Build macOS GUI installer
+        run: scripts/build-macos-installer.sh

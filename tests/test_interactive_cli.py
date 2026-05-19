@@ -28,6 +28,18 @@ def write_config(tmp_path, monkeypatch):
 def test_root_without_args_opens_interactive_menu(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(cli, "ask_choice", lambda prompt, options, default=0: "doctor")
+    monkeypatch.setattr(cli, "ask_yes_no", lambda prompt, default: False)
+    monkeypatch.setattr(cli, "cmd_doctor", lambda args: calls.append("doctor") or 0)
+
+    assert cli.main([]) == 0
+    assert calls == ["doctor"]
+
+
+def test_root_menu_can_return_to_main_menu(monkeypatch):
+    choices = iter(["doctor", "quit"])
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "ask_choice", lambda prompt, options, default=0: next(choices))
+    monkeypatch.setattr(cli, "ask_yes_no", lambda prompt, default: True)
     monkeypatch.setattr(cli, "cmd_doctor", lambda args: calls.append("doctor") or 0)
 
     assert cli.main([]) == 0

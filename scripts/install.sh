@@ -11,6 +11,7 @@ ASSUME_YES=0
 DRY_RUN=0
 NO_INIT=0
 SOURCE_DIR="${AI_OBSIDIAN_SOURCE_DIR:-}"
+ARCHIVE_PATH="${AI_OBSIDIAN_ARCHIVE:-}"
 REPO="${AI_OBSIDIAN_REPO:-$DEFAULT_REPO}"
 
 usage() {
@@ -26,6 +27,7 @@ Options:
   --bin-dir PATH        Shim directory. Default: ~/.local/bin
   --version VERSION     GitHub release version. Default: latest
   --source-dir PATH     Install from a local source checkout instead of GitHub.
+  --archive PATH        Install from a local release source tarball instead of GitHub.
   --no-init             Do not offer to run `ai-obsidian init` after install.
   -h, --help            Show this help.
 
@@ -33,6 +35,7 @@ Environment:
   AI_OBSIDIAN_REPO      GitHub repo, e.g. owner/repo. Default: aarogozin/ai-obsidian
   AI_OBSIDIAN_SOURCE_DIR
                         Local source checkout for testing or development installs.
+  AI_OBSIDIAN_ARCHIVE   Local source tarball for GUI installer artifacts.
 EOF
 }
 
@@ -112,6 +115,11 @@ parse_args() {
       --source-dir)
         [ "$#" -ge 2 ] || die "--source-dir requires a path"
         SOURCE_DIR="$(expand_path "$2")"
+        shift 2
+        ;;
+      --archive)
+        [ "$#" -ge 2 ] || die "--archive requires a path"
+        ARCHIVE_PATH="$(expand_path "$2")"
         shift 2
         ;;
       --no-init)
@@ -211,6 +219,25 @@ resolve_python() {
     command -v python3
     return 0
   fi
+  if [ -n "${AI_OBSIDIAN_TEST_HOMEBREW_PYTHON:-}" ]; then
+    if [ -x "$AI_OBSIDIAN_TEST_HOMEBREW_PYTHON" ] && python_ok "$AI_OBSIDIAN_TEST_HOMEBREW_PYTHON"; then
+      printf '%s\n' "$AI_OBSIDIAN_TEST_HOMEBREW_PYTHON"
+      return 0
+    fi
+  fi
+  for candidate in \
+    /opt/homebrew/bin/python3 \
+    /opt/homebrew/opt/python/bin/python3 \
+    /opt/homebrew/opt/python@3.14/bin/python3 \
+    /opt/homebrew/opt/python@3.13/bin/python3 \
+    /opt/homebrew/opt/python@3.12/bin/python3 \
+    /usr/local/bin/python3
+  do
+    if [ -x "$candidate" ] && python_ok "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -236,6 +263,19 @@ download_release() {
     [ -d "$SOURCE_DIR" ] || die "Source directory does not exist: $SOURCE_DIR"
     log "Installing from local source: $SOURCE_DIR"
     RELEASE_SRC_DIR="$SOURCE_DIR"
+    return 0
+  fi
+  if [ -n "$ARCHIVE_PATH" ]; then
+    [ -f "$ARCHIVE_PATH" ] || die "Source archive does not exist: $ARCHIVE_PATH"
+    log "Installing from bundled source archive: $ARCHIVE_PATH"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      RELEASE_SRC_DIR="$INSTALL_DIR/src"
+      return 0
+    fi
+    rm -rf "$INSTALL_DIR/src"
+    mkdir -p "$INSTALL_DIR/src"
+    tar -xzf "$ARCHIVE_PATH" --strip-components=1 -C "$INSTALL_DIR/src"
+    RELEASE_SRC_DIR="$INSTALL_DIR/src"
     return 0
   fi
 

@@ -27,6 +27,22 @@ If Homebrew is missing, the installer asks before running the official Homebrew 
 
 ## Install
 
+### GUI Installer
+
+The recommended mouse-first install path is the macOS GUI installer published as a GitHub Release artifact:
+
+```text
+AI-Obsidian-Installer-macos-arm64.dmg
+```
+
+Download it from the latest release, open the app, and follow the wizard. It installs the same CLI backend, has a dedicated button for core stack dependencies (Homebrew, Obsidian, oMLX, Hugging Face CLI, ffmpeg, and mlx-whisper), lets you choose vault and model locations with native pickers, configures Obsidian plugins, starts oMLX, and can open Obsidian at the end. The window stays open after each action and keeps a copyable command log for troubleshooting.
+
+Hermes is optional. The GUI includes a separate `Install Hermes CLI` action, then you can run `hermes setup` if Hermes needs provider/API-key configuration.
+
+The GUI installer is unsigned in the first release. macOS may require right-click -> Open or System Settings -> Privacy & Security -> Open Anyway. Developer ID signing and notarization are planned after the release flow is stable.
+
+### CLI Installer
+
 The intended user install path is the GitHub Release installer:
 
 ```bash
@@ -100,6 +116,8 @@ ai-obsidian
 ai-obsidian doctor
 ai-obsidian doctor --json
 ai-obsidian repair
+ai-obsidian setup status --json
+ai-obsidian setup models --json
 ai-obsidian stack status
 ai-obsidian soul status
 ai-obsidian soul init
@@ -180,6 +198,12 @@ Interactive flows ask before installing Homebrew. Non-interactive install can al
 
 ```bash
 ai-obsidian install --execute --yes
+```
+
+Optional Hermes Agent CLI support can be installed separately:
+
+```bash
+ai-obsidian install --execute --yes --only-hermes
 ```
 
 ### oMLX is not ready

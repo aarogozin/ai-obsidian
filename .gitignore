@@ -25,6 +25,9 @@ release/
 *.egg-info/
 *.whl
 *.tar.gz
+*.dmg
+*.app/
+*.xcarchive/
 pip-wheel-metadata/
 
 # Local installer/dev output

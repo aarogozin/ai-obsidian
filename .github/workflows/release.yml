@@ -33,6 +33,7 @@ jobs:
           cp scripts/install.sh release/install.sh
           cp "scripts/AI Obsidian Installer.command" "release/AI Obsidian Installer.command"
           cp dist/* release/
+          AI_OBSIDIAN_VERSION="$VERSION" scripts/build-macos-installer.sh
           (cd release && shasum -a 256 * > checksums.txt)
       - name: Upload GitHub Release
         env:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from http.client import IncompleteRead
+
 from ai_obsidian import model_catalog
 from ai_obsidian.model_catalog import ModelChoice
 
@@ -30,6 +32,18 @@ def test_load_model_choices_forwards_targeted_searches(monkeypatch):
     model_catalog.load_model_choices(load_remote_models=True, searches=("gemma-4",))
 
     assert seen == [("gemma-4",)]
+
+
+def test_model_choices_fall_back_when_remote_response_is_incomplete(monkeypatch):
+    def broken_fetch(_query):
+        raise IncompleteRead(b"partial", 10)
+
+    monkeypatch.setattr(model_catalog, "fetch_huggingface_query", broken_fetch)
+
+    choices, source = model_catalog.load_model_choices(load_remote_models=True)
+
+    assert choices
+    assert source == "offline fallback list"
 
 
 def test_model_fetch_filter_rejects_non_chat_model_names():
