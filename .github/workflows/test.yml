@@ -35,6 +35,11 @@ jobs:
         run: |
           bash -n scripts/install.sh
           bash -n scripts/build-macos-installer.sh
+          bash -n scripts/docker-install.sh
+          bash -n scripts/docker-bootstrap.sh
+          bash -n scripts/start-docker-runtime.sh
+      - name: Docker compose smoke
+        run: docker compose -f docker/compose.yaml config
       - name: Dry run
         env:
           AI_OBSIDIAN_TEST_UNAME_S: Darwin

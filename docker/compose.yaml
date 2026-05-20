@@ -1,0 +1,21 @@
+services:
+  ai-obsidian:
+    image: "${AI_OBSIDIAN_DOCKER_IMAGE:-mrrogozin/obsidian-omlx:edge}"
+    user: "${AI_OBSIDIAN_UID:-1000}:${AI_OBSIDIAN_GID:-1000}"
+    group_add:
+      - "0"
+    working_dir: /workspace
+    environment:
+      HOME: "${HOME}"
+      AI_OBSIDIAN_CONFIG_DIR: "${AI_OBSIDIAN_CONFIG_DIR:-${HOME}/.ai-obsidian}"
+      AI_OBSIDIAN_IN_CONTAINER: "1"
+      AI_OBSIDIAN_DMR_CONTAINER_BASE_URL: "${AI_OBSIDIAN_DMR_CONTAINER_BASE_URL:-http://host.docker.internal:12434/engines/v1}"
+      AI_OBSIDIAN_SKIP_OBSIDIAN_APP_CHECK: "${AI_OBSIDIAN_SKIP_OBSIDIAN_APP_CHECK:-0}"
+      DOCKER_HOST: "unix:///var/run/docker.sock"
+      DOCKER_CONFIG: "/tmp/ai-obsidian-docker-config"
+    volumes:
+      - "${HOME}:${HOME}"
+      - "..:/workspace:ro"
+      - "${AI_OBSIDIAN_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock"
+    stdin_open: true
+    tty: true

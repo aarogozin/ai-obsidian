@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${AI_OBSIDIAN_VERSION:-0.2.0}"
+VERSION="${AI_OBSIDIAN_VERSION:-0.2.1}"
 BUILD_DIR="${ROOT}/build/macos-installer"
 RELEASE_DIR="${ROOT}/release"
 APP_NAME="AI Obsidian Installer"

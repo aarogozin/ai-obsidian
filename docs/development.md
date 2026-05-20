@@ -61,6 +61,39 @@ ai-obsidian setup apply --profile profile.json --yes
 
 Do not duplicate setup behavior in Swift. Add backend behavior to the Python CLI first, then call it from the app. Optional external engines such as Hermes should stay explicit user actions, separate from the required Obsidian/oMLX stack.
 
+## Docker Control Plane
+
+Docker mode keeps Obsidian native and uses Docker Model Runner as the accelerated OpenAI-compatible model server. The Docker image only packages the AI Obsidian control plane.
+
+Validate the Docker files without pulling models:
+
+```bash
+bash -n scripts/docker-install.sh
+bash -n scripts/docker-bootstrap.sh
+docker compose -f docker/compose.yaml config
+```
+
+Build the local image and shim:
+
+```bash
+scripts/docker-install.sh --yes --build-local
+```
+
+Run the full Docker-first bootstrap with dry-run logging:
+
+```bash
+scripts/docker-bootstrap.sh --dry-run --yes --no-open
+```
+
+Keep Docker behavior behind `runtime.mode=docker-model-runner`. Do not make Docker mode install Homebrew, oMLX, Hugging Face CLI, ffmpeg, or mlx-whisper. Native oMLX remains the default runtime.
+
+Published Docker images:
+
+- Docker Hub: `mrrogozin/obsidian-omlx`
+- GHCR: `ghcr.io/aarogozin/ai-obsidian`
+
+Docker image CI builds `linux/arm64` only. Pull requests build without pushing; `main` pushes `main` and `edge`; `v*` tags push `vX.Y.Z`, `X.Y.Z`, and `latest`. The Docker installer resolves exact tag checkouts to the matching image tag, main/branch checkouts to `edge`, and source archives to the `pyproject.toml` version.
+
 ## GitHub Actions
 
 The repository includes GitHub Actions workflows for:
@@ -76,8 +109,8 @@ CI does not perform real Homebrew, Obsidian, oMLX, or model installs. It uses dr
 Create a version tag:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 The release workflow uploads:

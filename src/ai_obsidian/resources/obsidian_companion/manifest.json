@@ -1,7 +1,7 @@
 {
   "id": "ai-obsidian-companion",
   "name": "AI Obsidian Companion",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.5.0",
   "description": "Push-to-talk voice input for AI Obsidian vault workflows.",
   "author": "AI Obsidian contributors",

@@ -1,6 +1,6 @@
 [project]
 name = "ai-obsidian"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local Apple Silicon CLI installer and assistant for Obsidian + oMLX."
 readme = "README.md"
 requires-python = ">=3.10"

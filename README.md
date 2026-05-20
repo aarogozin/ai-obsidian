@@ -13,6 +13,7 @@ It helps you set up:
 - AI Obsidian Companion push-to-talk voice input inside Obsidian
 - a terminal chat fallback over Markdown notes
 - optional Hermes and Claude Code terminal chat providers
+- optional Docker Model Runner runtime for Docker-first local inference
 
 The project is currently focused on Apple Silicon Macs. Linux is used only for fast CI checks.
 
@@ -24,6 +25,8 @@ The project is currently focused on Apple Silicon Macs. Linux is used only for f
 - Homebrew-compatible setup
 
 If Homebrew is missing, the installer asks before running the official Homebrew installer.
+
+Docker mode is optional. It requires Docker Desktop for Mac and Obsidian, then uses Docker Model Runner for local OpenAI-compatible inference at `http://localhost:12434/engines/v1`.
 
 ## Install
 
@@ -91,6 +94,49 @@ For a development checkout:
 
 Running `ai-obsidian` or `./ai-obsidian` with no arguments opens an interactive menu.
 
+## Docker Mode
+
+Docker mode is a hybrid path: Obsidian stays native on macOS, AI Obsidian can run from a Docker control-plane container, and model inference uses Docker Model Runner instead of oMLX.
+
+```bash
+scripts/docker-bootstrap.sh
+ai-obsidian-docker docker status
+```
+
+The bootstrap script pulls the published Docker control-plane image, installs the `ai-obsidian-docker` shim, enables Docker Model Runner TCP, pulls the default `ai/smollm2` model, applies a Docker runtime profile, configures the Obsidian plugins, and opens the vault. A tag checkout uses the matching Docker tag, for example `mrrogozin/obsidian-omlx:v0.2.1`; a normal `main` checkout uses `mrrogozin/obsidian-omlx:edge`.
+
+For local development before a release image is available:
+
+```bash
+scripts/docker-bootstrap.sh --build-local
+```
+
+You can still apply a profile manually with `runtime.mode` set to `docker-model-runner`:
+
+```json
+{
+  "runtime": { "mode": "docker-model-runner" },
+  "omlx": { "selected_model": "ai/smollm2" },
+  "vault": { "mode": "existing", "name": "Main", "path": "/Users/you/Documents/Obsidian/Main" },
+  "plugins": { "install_hub": true, "install_companion": true },
+  "launch": { "start_stack": true, "open_obsidian": true }
+}
+```
+
+Then apply and start:
+
+```bash
+ai-obsidian-docker setup apply --profile docker-profile.json --yes
+ai-obsidian-docker stack start
+```
+
+This does not try to run raw MLX inside a normal Linux container. Docker Model Runner owns the accelerated local model server; AI Obsidian configures Obsidian plugins against `http://localhost:12434/engines/v1`.
+
+Docker image names:
+
+- Docker Hub: `mrrogozin/obsidian-omlx`
+- GHCR mirror: `ghcr.io/aarogozin/ai-obsidian`
+
 ## What Init Does
 
 `ai-obsidian init` is the main first-run flow:
@@ -119,6 +165,9 @@ ai-obsidian repair
 ai-obsidian setup status --json
 ai-obsidian setup models --json
 ai-obsidian stack status
+ai-obsidian docker status
+ai-obsidian docker start
+ai-obsidian docker stop
 ai-obsidian soul status
 ai-obsidian soul init
 ai-obsidian soul show
@@ -151,6 +200,7 @@ Inside terminal chat:
 
 - [Vault Soul instructions](docs/vault-soul.md)
 - [Model recommendations for Apple Silicon](docs/models.md)
+- [Docker deployment mode](docs/docker.md)
 - [Development and release notes](docs/development.md)
 
 ## Safety
@@ -240,6 +290,18 @@ ai-obsidian models use
 ```
 
 The picker shows downloaded MLX models first, then models served by oMLX.
+
+### Docker Model Runner is not ready
+
+Check:
+
+```bash
+ai-obsidian docker status
+docker desktop status
+docker model status
+```
+
+Start Docker Desktop and enable Docker Model Runner. AI Obsidian expects the OpenAI-compatible endpoint at `http://localhost:12434/engines/v1`.
 
 ### Obsidian opens but the plugin is missing
 

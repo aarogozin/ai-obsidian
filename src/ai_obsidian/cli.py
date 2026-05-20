@@ -15,6 +15,21 @@ from urllib.parse import urlparse
 
 from .chat import run_builtin_chat, run_external_chat
 from .chat_providers import external_engine_statuses
+from .docker_runtime import (
+    DEFAULT_DMR_BASE_URL,
+    RUNTIME_DOCKER_MODEL_RUNNER,
+    RUNTIME_NATIVE_OMLX,
+    docker_model_runner_suggestion_for_model,
+    docker_model_list,
+    docker_model_pull,
+    docker_model_run_detached,
+    docker_status,
+    ensure_docker_model_runner,
+    is_docker_model_id,
+    is_docker_runtime,
+    is_native_mlx_repo_id,
+    runtime_mode,
+)
 from .installer import (
     DEFAULT_VAULTS_ROOT,
     DEFAULT_MODEL_DIR,
@@ -85,6 +100,19 @@ class DownloadedModel:
     note: str = ""
 
 
+DOCKER_MODEL_SUGGESTIONS = [
+    {
+        "repo_id": "ai/smollm2",
+        "label": "SmolLM2",
+        "min_ram_gb": 8,
+        "family": "smollm",
+        "version": "2",
+        "size_bucket": "small",
+        "note": "Fast default for Docker Model Runner smoke tests and light notes.",
+    },
+]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -124,6 +152,12 @@ def build_parser() -> argparse.ArgumentParser:
     setup_models.add_argument("--version", help="Filter remote suggestions by parsed model version.")
     setup_models.add_argument("--size", choices=["small", "balanced", "large"], help="Filter remote suggestions by size bucket.")
     setup_models.add_argument("--model-dir", help="Additional model directory to inspect first.")
+    setup_models.add_argument(
+        "--runtime",
+        choices=[RUNTIME_NATIVE_OMLX, RUNTIME_DOCKER_MODEL_RUNNER],
+        default=RUNTIME_NATIVE_OMLX,
+        help="Return model choices for the selected runtime.",
+    )
     setup_models.set_defaults(func=cmd_setup_models)
     setup_apply = setup_sub.add_parser("apply", help="Apply a setup profile produced by the macOS installer UI.")
     setup_apply.add_argument("--profile", required=True, help="Path to a JSON setup profile.")
@@ -142,6 +176,17 @@ def build_parser() -> argparse.ArgumentParser:
     service = subparsers.add_parser("service", help="Manage the oMLX service.")
     service.add_argument("action", choices=["status", "start", "stop", "restart"])
     service.set_defaults(func=cmd_service)
+
+    docker = subparsers.add_parser("docker", help="Manage the Docker Model Runner runtime.")
+    docker.add_argument("action", choices=["init", "status", "start", "stop", "doctor"])
+    docker.add_argument("--yes", action="store_true", help="Run docker init without confirmation where possible.")
+    docker.add_argument("--vault", help="Vault path for docker init.")
+    docker.add_argument("--vault-name", default="Main", help="Vault registration name for docker init.")
+    docker.add_argument("--model", default="ai/smollm2", help="Docker Model Runner model id for docker init.")
+    docker.add_argument("--chat-engine", choices=["builtin", "hermes", "claude"], default="builtin")
+    docker.add_argument("--no-open", action="store_true", help="Do not open Obsidian after docker init.")
+    docker.add_argument("--dry-run", action="store_true", help="Print docker init actions without changing files.")
+    docker.set_defaults(func=cmd_docker)
 
     stack = subparsers.add_parser("stack", help="Start, stop, and inspect the full local AI Obsidian stack.")
     stack_sub = stack.add_subparsers(required=True)
@@ -240,6 +285,7 @@ def main_menu_options() -> list[tuple[str, str]]:
         ("vault", "Choose default vault"),
         ("model", "Choose default model"),
         ("stack", "Start/stop stack"),
+        ("docker", "Docker Model Runner runtime"),
         ("plugin", "Install/configure/open Obsidian AI plugin"),
         ("soul", "Manage vault soul.md instructions"),
         ("voice", "Transcribe a voice recording"),
@@ -273,6 +319,13 @@ def run_menu_choice(choice: str) -> int:
         if stack_choice == "status":
             return cmd_stack_status(argparse.Namespace(vault=None))
         return cmd_stack_stop(argparse.Namespace())
+    if choice == "docker":
+        docker_choice = ask_choice(
+            "Docker",
+            [("status", "Status"), ("start", "Start"), ("stop", "Stop"), ("doctor", "Doctor")],
+            default=0,
+        )
+        return cmd_docker(argparse.Namespace(action=docker_choice))
     if choice == "plugin":
         plugin_choice = ask_choice(
             "Plugin",
@@ -327,6 +380,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"{label}: {value} [{marker}]")
 
     print_omlx_status()
+    print_docker_health_summary(health)
     print_external_engine_status(health)
     print_soul_health_summary(health)
     print_plugin_health_summary(health)
@@ -360,9 +414,19 @@ def cmd_setup_models(args: argparse.Namespace) -> int:
         version=getattr(args, "version", None),
         size=getattr(args, "size", None),
         model_dir=Path(args.model_dir).expanduser() if getattr(args, "model_dir", None) else None,
+        runtime=getattr(args, "runtime", RUNTIME_NATIVE_OMLX),
     )
     if getattr(args, "json", False):
         print(json.dumps(payload, indent=2))
+        return 0
+
+    if payload.get("runtime") == RUNTIME_DOCKER_MODEL_RUNNER:
+        print("Docker Model Runner models:")
+        for model in payload["docker_models"]:
+            print(f"- {model['id']} | pulled")
+        print(f"\nDocker Model Runner suggestions ({payload['remote_source']}):")
+        for model in payload["remote"]:
+            print(f"- {model['repo_id']} | {model['note']}")
         return 0
 
     print("Downloaded/local models:")
@@ -401,11 +465,14 @@ def cmd_setup_apply(args: argparse.Namespace) -> int:
         print(f"Existing vault path does not exist: {vault_path}", file=sys.stderr)
         return 1
 
-    prerequisite_status = ensure_prerequisites(
-        interactive=False,
-        start_omlx_service=False,
-        allow_homebrew_install=True,
-    )
+    if plan["runtime"]["mode"] == RUNTIME_DOCKER_MODEL_RUNNER:
+        prerequisite_status = ensure_docker_setup_prerequisites(plan["omlx"]["base_url"])
+    else:
+        prerequisite_status = ensure_prerequisites(
+            interactive=False,
+            start_omlx_service=False,
+            allow_homebrew_install=True,
+        )
     if prerequisite_status != 0:
         return prerequisite_status
 
@@ -547,6 +614,115 @@ def cmd_service(args: argparse.Namespace) -> int:
     return result.returncode
 
 
+def cmd_docker(args: argparse.Namespace) -> int:
+    if args.action == "init":
+        return cmd_docker_init(args)
+
+    config = load_config()
+    omlx = config.get("omlx", {})
+    base_url = omlx.get("base_url") if runtime_mode(config) == RUNTIME_DOCKER_MODEL_RUNNER else DEFAULT_DMR_BASE_URL
+    status = docker_status(base_url=docker_reachability_base_url(config, base_url))
+
+    if args.action in {"status", "doctor"}:
+        print("Docker runtime status")
+        print(f"Docker CLI: {status.docker_cli or 'missing'}")
+        print(f"Docker Desktop: {'running' if status.desktop_running else 'not running or unavailable'}")
+        print(f"Docker daemon: {'running' if status.daemon_running else 'not reachable'}")
+        print(f"Docker Model Runner: {'running' if status.model_runner_running else 'not ready'}")
+        print(f"OpenAI endpoint: {'reachable' if status.api_reachable else 'not reachable'}")
+        print(f"OpenAI-compatible API: {status.base_url}")
+        if status.backends:
+            print("Docker Model Runner backends:")
+            for backend, backend_status in status.backends.items():
+                details = backend_status.get("details") or ""
+                print(f"- {backend}: {backend_status.get('status', 'unknown')} {details}".rstrip())
+        if status.models:
+            print("Docker Model Runner models:")
+            for model in status.models:
+                print(f"- {model}")
+        else:
+            print("Docker Model Runner models: none visible")
+        if status.error:
+            print(f"Detail: {status.error}")
+        if args.action == "doctor" and not status.ok:
+            print("Next step: start Docker Desktop and enable Docker Model Runner.")
+        return 0 if status.ok else 1
+
+    if args.action == "start":
+        start_status = ensure_docker_model_runner(base_url=docker_reachability_base_url(config, base_url))
+        if start_status != 0:
+            return start_status
+        if runtime_mode(config) != RUNTIME_DOCKER_MODEL_RUNNER:
+            models = docker_model_list()
+            print("Docker Model Runner is ready.")
+            if models:
+                print("Available Docker models:")
+                for model in models:
+                    print(f"- {model}")
+            else:
+                print("No Docker models are pulled yet.")
+                print("Try: docker model pull ai/smollm2")
+            print("AI Obsidian is still configured for native oMLX.")
+            print("Use a setup profile with runtime.mode=docker-model-runner to make stack start use Docker.")
+            return 0
+        selected = omlx.get("selected_model")
+        if selected:
+            if not is_docker_model_id(selected):
+                print("Configured model is not a Docker Model Runner model id.")
+                print(f"Configured model: {selected}")
+                print(docker_model_runner_suggestion_for_model(selected, status.backends) or "Choose a Docker model such as `ai/smollm2`.")
+                return 1
+            models = docker_model_list()
+            if any(model_matches(selected, model) for model in models):
+                print(f"Docker model is visible through the API: {selected}")
+                return 0
+            if os.environ.get("AI_OBSIDIAN_IN_CONTAINER") == "1":
+                print(f"Docker model is not visible through the API: {selected}")
+                print(f"Run on macOS: docker model pull {selected}")
+                return 1
+            if not any(model_matches(selected, model) for model in models):
+                print(f"Docker model is not pulled yet: {selected}")
+                pull_status = docker_model_pull(selected)
+                if pull_status != 0:
+                    return pull_status
+            return docker_model_run_detached(selected)
+        print("Docker Model Runner is ready. No model is configured yet.")
+        return 0
+
+    if args.action == "stop":
+        docker = status.docker_cli
+        if not docker:
+            print("Docker CLI is not installed.")
+            return 1
+        print("Stopping Docker Model Runner loaded models. Pulled models and vaults are left untouched.")
+        return subprocess.run([docker, "model", "unload", "--all"], check=False).returncode
+
+    return 2
+
+
+def cmd_docker_init(args: argparse.Namespace) -> int:
+    script = repo_root() / "scripts" / "docker-bootstrap.sh"
+    if not script.exists():
+        print("Docker bootstrap script was not found in this checkout.")
+        print("From a source checkout, run: scripts/docker-bootstrap.sh")
+        return 1
+
+    command = [str(script), "--model", args.model, "--vault-name", args.vault_name, "--chat-engine", args.chat_engine]
+    if args.yes:
+        command.append("--yes")
+    if args.dry_run:
+        command.append("--dry-run")
+    if args.vault:
+        command.extend(["--vault", args.vault])
+    if args.no_open:
+        command.append("--no-open")
+    print(f"Running: {' '.join(command)}")
+    sys.stdout.flush()
+    return subprocess.run(command, check=False).returncode
+
+    return 2
+
+
 def cmd_stack_start(args: argparse.Namespace) -> int:
     config = load_config()
     omlx = config.get("omlx", {})
@@ -558,6 +734,9 @@ def cmd_stack_start(args: argparse.Namespace) -> int:
     if not selected:
         print("No model is configured yet. Run `./ai-obsidian init` or `./ai-obsidian models use <model-id>`.")
         return 1
+
+    if is_docker_runtime(config):
+        return cmd_stack_start_docker(args, config)
 
     model_dir = Path(omlx.get("model_dir") or Path.home() / ".omlx" / "models")
     base_url = omlx.get("base_url", DEFAULT_OMLX_BASE_URL)
@@ -625,8 +804,13 @@ def cmd_stack_status(args: argparse.Namespace) -> int:
     print("AI Obsidian stack status")
     doctor_status = cmd_doctor(argparse.Namespace())
 
-    print("\noMLX service:")
-    service_status = cmd_service(argparse.Namespace(action="status"))
+    config = load_config()
+    if is_docker_runtime(config):
+        print("\nDocker Model Runner:")
+        service_status = cmd_docker(argparse.Namespace(action="status"))
+    else:
+        print("\noMLX service:")
+        service_status = cmd_service(argparse.Namespace(action="status"))
 
     print("\nModels:")
     model_status = cmd_models_status()
@@ -656,8 +840,80 @@ def cmd_stack_status(args: argparse.Namespace) -> int:
 
 
 def cmd_stack_stop(_: argparse.Namespace) -> int:
+    if is_docker_runtime(load_config()):
+        return cmd_docker(argparse.Namespace(action="stop"))
     print("Stopping oMLX Homebrew service. Models, vaults, and config are left untouched.")
     return cmd_service(argparse.Namespace(action="stop"))
+
+
+def cmd_stack_start_docker(args: argparse.Namespace, config: dict[str, Any]) -> int:
+    omlx = config.get("omlx", {})
+    selected = omlx.get("selected_model")
+    base_url = omlx.get("base_url") or DEFAULT_DMR_BASE_URL
+    client_base_url = dmr_client_base_url(config)
+    vault = args.vault or config.get("default_vault")
+    if not vault and getattr(args, "interactive", True):
+        selected_vault = choose_vault_from_config()
+        vault = selected_vault[0] if selected_vault else None
+
+    print("AI Obsidian Docker stack start")
+    print(f"Runtime: {RUNTIME_DOCKER_MODEL_RUNNER}")
+    print(f"Configured model: {selected}")
+    print(f"Docker Model Runner API: {base_url}")
+    if client_base_url != base_url:
+        print(f"Container access URL: {client_base_url}")
+
+    if not is_docker_model_id(selected):
+        status = docker_status(base_url=client_base_url)
+        print("Configured model is not a Docker Model Runner model id.")
+        print(f"Configured model: {selected}")
+        print(docker_model_runner_suggestion_for_model(selected, status.backends) or "Choose a Docker model such as `ai/smollm2`.")
+        return 1
+
+    if ensure_docker_model_runner(base_url=client_base_url) != 0:
+        return 1
+
+    pulled_models = docker_model_list()
+    if not any(model_matches(selected, model) for model in pulled_models):
+        print(f"Selected Docker model is not pulled yet: {selected}")
+        if docker_model_pull(selected) != 0:
+            print("Docker model pull failed. Re-run `./ai-obsidian docker status` after fixing Docker Model Runner.")
+            return 1
+    else:
+        print("Selected Docker model is already pulled. Skipping pull.")
+
+    client = OmlxClient(base_url=client_base_url, api_key=None)
+    served_before_start, existing_api_error = list_models_if_reachable(client)
+    if served_before_start is None:
+        if existing_api_error:
+            print(f"Docker Model Runner API is not ready yet: {existing_api_error}")
+        if docker_model_run_detached(selected) != 0:
+            return 1
+        served_models = wait_for_omlx_models(client, selected_model=selected, service_label="Docker Model Runner")
+        if served_models is None:
+            print("Docker Model Runner did not become ready in time.")
+            return 1
+    else:
+        served_models = served_before_start
+        print(f"Docker Model Runner API is reachable at {base_url} [{len(served_models)} models].")
+
+    if not any(model_matches(selected, model) for model in served_models):
+        print("Docker Model Runner is running, but the configured model is not visible through /models.")
+        print(f"Configured model: {selected}")
+        print("Visible models:")
+        for model in served_models:
+            print(f"- {model}")
+        print("Run `./ai-obsidian docker status` and choose one of the visible model ids.")
+        return 1
+
+    active_model = reconcile_configured_model(config, selected, served_models, interactive=getattr(args, "interactive", True))
+    config.setdefault("omlx", {})["selected_model"] = active_model
+    config.setdefault("runtime", {})["mode"] = RUNTIME_DOCKER_MODEL_RUNNER
+    sync_status = sync_obsidian_plugins_after_stack_ready(config, vault)
+    if sync_status != 0:
+        return sync_status
+    print_ready(config, vault)
+    return 0
 
 
 def model_available(selected: str, model_dir: Path, client: OmlxClient) -> bool:
@@ -726,17 +982,18 @@ def wait_for_omlx_models(
     selected_model: str | None = None,
     timeout_seconds: int = 60,
     interval_seconds: float = 2.0,
+    service_label: str = "oMLX",
 ) -> list[str] | None:
-    print("Waiting for oMLX /v1/models ...")
+    print(f"Waiting for {service_label} /models ...")
     deadline = time.monotonic() + timeout_seconds
     last_error: OmlxError | None = None
     while time.monotonic() < deadline:
         try:
             models = client.list_models()
             if not selected_model or any(model_matches(selected_model, model) for model in models):
-                print(f"oMLX API is reachable at {client.base_url} [{len(models)} models].")
+                print(f"{service_label} API is reachable at {client.base_url} [{len(models)} models].")
                 return models
-            print(f"oMLX is reachable, waiting for selected model to appear: {selected_model}")
+            print(f"{service_label} is reachable, waiting for selected model to appear: {selected_model}")
         except OmlxError as exc:
             last_error = exc
         time.sleep(interval_seconds)
@@ -769,8 +1026,13 @@ def reconcile_configured_model(
 
 def print_ready(config: dict[str, Any], vault: str | None) -> None:
     print("\nYou are ready.")
-    print(f"oMLX API: {config.get('omlx', {}).get('base_url', DEFAULT_OMLX_BASE_URL)}")
-    print(f"oMLX browser chat: {DEFAULT_OMLX_ADMIN_CHAT_URL} (diagnostic)")
+    omlx = config.get("omlx", {})
+    if is_docker_runtime(config):
+        print(f"Docker Model Runner API: {omlx.get('base_url', DEFAULT_DMR_BASE_URL)}")
+        print("Docker Model Runner has no separate browser chat in AI Obsidian v1.")
+    else:
+        print(f"oMLX API: {omlx.get('base_url', DEFAULT_OMLX_BASE_URL)}")
+        print(f"oMLX browser chat: {DEFAULT_OMLX_ADMIN_CHAT_URL} (diagnostic)")
     print_next_steps(config, vault)
 
 
@@ -871,8 +1133,9 @@ def repair_served_model_id(config: dict[str, Any]) -> dict[str, Any]:
     selected = omlx.get("selected_model")
     if not selected:
         return config
+    default_base_url = DEFAULT_DMR_BASE_URL if is_docker_runtime(config) else DEFAULT_OMLX_BASE_URL
     client = OmlxClient(
-        base_url=omlx.get("base_url", DEFAULT_OMLX_BASE_URL),
+        base_url=dmr_client_base_url(config) if is_docker_runtime(config) else omlx.get("base_url", default_base_url),
         api_key=omlx.get("api_key") or os.environ.get("OMLX_API_KEY"),
     )
     served_models, _ = list_models_if_reachable(client)
@@ -926,6 +1189,14 @@ def collect_setup_status() -> dict[str, Any]:
         "platform_ok": prerequisites.arch_ok and prerequisites.macos_ok,
         "prerequisites": asdict(prerequisites),
         "runtime": collect_setup_runtime(config),
+        "docker": docker_status(
+            base_url=docker_reachability_base_url(
+                config,
+                config.get("omlx", {}).get("base_url", DEFAULT_DMR_BASE_URL)
+                if is_docker_runtime(config)
+                else DEFAULT_DMR_BASE_URL,
+            )
+        ).to_json(),
         "config": sanitized_config(config),
         "vaults": vaults,
         "model_dirs": model_dirs,
@@ -936,14 +1207,17 @@ def collect_setup_status() -> dict[str, Any]:
 
 def collect_setup_runtime(config: dict[str, Any]) -> dict[str, Any]:
     omlx = config.get("omlx", {})
-    base_url = omlx.get("base_url", DEFAULT_OMLX_BASE_URL)
+    mode = runtime_mode(config)
+    default_base_url = DEFAULT_DMR_BASE_URL if mode == RUNTIME_DOCKER_MODEL_RUNNER else DEFAULT_OMLX_BASE_URL
+    base_url = omlx.get("base_url", default_base_url)
     selected = omlx.get("selected_model")
     client = OmlxClient(
-        base_url=base_url,
+        base_url=dmr_client_base_url(config) if mode == RUNTIME_DOCKER_MODEL_RUNNER else base_url,
         api_key=omlx.get("api_key") or os.environ.get("OMLX_API_KEY"),
     )
     served_models, error = list_models_if_reachable(client)
     return {
+        "mode": mode,
         "omlx": {
             "base_url": base_url,
             "configured_model": selected,
@@ -951,7 +1225,13 @@ def collect_setup_runtime(config: dict[str, Any]) -> dict[str, Any]:
             "served_models": served_models or [],
             "model_visible": bool(served_models and selected and any(model_matches(selected, model) for model in served_models)),
             "error": str(error) if error else None,
-        }
+        },
+        "docker_model_runner": docker_status(
+            base_url=docker_reachability_base_url(
+                config,
+                base_url if mode == RUNTIME_DOCKER_MODEL_RUNNER else DEFAULT_DMR_BASE_URL,
+            )
+        ).to_json(),
     }
 
 
@@ -962,7 +1242,39 @@ def collect_setup_models(
     version: str | None,
     size: str | None,
     model_dir: Path | None,
+    runtime: str = RUNTIME_NATIVE_OMLX,
 ) -> dict[str, Any]:
+    if runtime == RUNTIME_DOCKER_MODEL_RUNNER:
+        docker_models = [
+            {
+                "id": model,
+                "source": "Docker Model Runner",
+                "format": "Docker Model Runner",
+                "path": "",
+                "size_bytes": 0,
+                "note": "managed by Docker Model Runner",
+            }
+            for model in docker_model_list()
+        ]
+        suggestions = []
+        for suggestion in DOCKER_MODEL_SUGGESTIONS:
+            if family and suggestion["family"] != family:
+                continue
+            if version and suggestion["version"] != version:
+                continue
+            if size and suggestion["size_bucket"] != size:
+                continue
+            suggestions.append(suggestion)
+        return {
+            "runtime": RUNTIME_DOCKER_MODEL_RUNNER,
+            "memory_gb": system_memory_gb(),
+            "allowed_size_buckets": ["small", "balanced", "large"],
+            "docker_models": docker_models,
+            "downloaded": [],
+            "remote_source": "Docker Model Runner curated defaults",
+            "remote": suggestions if load_remote_models else [],
+        }
+
     remote_choices, source = load_model_choices(
         load_remote_models,
         searches=MODEL_SEARCHES_BY_FAMILY.get(family) if family else None,
@@ -983,6 +1295,17 @@ def collect_setup_models(
         filtered_remote.append(model_choice_to_json(choice))
 
     downloaded = [downloaded_model_to_json(model) for model in discover_downloaded_models()]
+    docker_models = [
+        {
+            "id": model,
+            "source": "Docker Model Runner",
+            "format": "Docker Model Runner",
+            "path": "",
+            "size_bytes": 0,
+            "note": "managed by Docker Model Runner",
+        }
+        for model in docker_model_list()
+    ]
     if model_dir is not None:
         configured = [
             downloaded_mlx_model_to_json(model)
@@ -992,8 +1315,10 @@ def collect_setup_models(
         downloaded = configured + downloaded
 
     return {
+        "runtime": RUNTIME_NATIVE_OMLX,
         "memory_gb": system_memory_gb(),
         "allowed_size_buckets": allowed_buckets,
+        "docker_models": docker_models,
         "downloaded": downloaded,
         "remote_source": source,
         "remote": filtered_remote[:50],
@@ -1005,6 +1330,7 @@ def normalize_setup_profile(profile: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("profile must be a JSON object")
 
     omlx = profile.get("omlx") if isinstance(profile.get("omlx"), dict) else {}
+    runtime = profile.get("runtime") if isinstance(profile.get("runtime"), dict) else {}
     vault = profile.get("vault") if isinstance(profile.get("vault"), dict) else {}
     chat = profile.get("chat") if isinstance(profile.get("chat"), dict) else {}
     plugins = profile.get("plugins") if isinstance(profile.get("plugins"), dict) else {}
@@ -1022,11 +1348,19 @@ def normalize_setup_profile(profile: dict[str, Any]) -> dict[str, Any]:
     selected_model = omlx.get("selected_model")
     if not isinstance(selected_model, str) or not selected_model.strip():
         raise ValueError("omlx.selected_model is required")
+    runtime_mode_value = runtime.get("mode", omlx.get("mode", "service"))
+    if runtime_mode_value in {"service", "manual", "menubar"}:
+        runtime_mode_value = RUNTIME_NATIVE_OMLX
+    if runtime_mode_value not in {RUNTIME_NATIVE_OMLX, RUNTIME_DOCKER_MODEL_RUNNER}:
+        raise ValueError("runtime.mode must be native-omlx or docker-model-runner")
+
     model_dir_value = omlx.get("model_dir") or str(DEFAULT_MODEL_DIR)
     if not isinstance(model_dir_value, str):
         raise ValueError("omlx.model_dir must be a path string")
     mode = omlx.get("mode", "service")
-    if mode not in {"service", "manual", "menubar"}:
+    if runtime_mode_value == RUNTIME_DOCKER_MODEL_RUNNER:
+        mode = RUNTIME_DOCKER_MODEL_RUNNER
+    elif mode not in {"service", "manual", "menubar"}:
         raise ValueError("omlx.mode must be service, manual, or menubar")
 
     chat_engine = chat.get("default_engine", "builtin")
@@ -1034,10 +1368,16 @@ def normalize_setup_profile(profile: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("chat.default_engine must be builtin, hermes, or claude")
 
     return {
+        "runtime": {
+            "mode": runtime_mode_value,
+        },
         "omlx": {
             "mode": mode,
-            "base_url": str(omlx.get("base_url") or DEFAULT_OMLX_BASE_URL),
-            "api_key": str(omlx.get("api_key") or ""),
+            "base_url": str(
+                omlx.get("base_url")
+                or (DEFAULT_DMR_BASE_URL if runtime_mode_value == RUNTIME_DOCKER_MODEL_RUNNER else DEFAULT_OMLX_BASE_URL)
+            ),
+            "api_key": "" if runtime_mode_value == RUNTIME_DOCKER_MODEL_RUNNER else str(omlx.get("api_key") or ""),
             "model_dir": str(Path(model_dir_value).expanduser().resolve()),
             "selected_model": selected_model.strip(),
         },
@@ -1067,6 +1407,7 @@ def config_from_setup_plan(plan: dict[str, Any]) -> dict[str, Any]:
         omlx.pop("api_key", None)
     return {
         "omlx": omlx,
+        "runtime": plan["runtime"],
         "vaults_root": str(Path(vault["path"]).parent),
         "default_vault": vault["name"],
         "vaults": {
@@ -1086,6 +1427,51 @@ def sanitized_config(config: dict[str, Any]) -> dict[str, Any]:
         omlx["api_key_configured"] = bool(omlx.get("api_key"))
         omlx["api_key"] = ""
     return sanitized
+
+
+def ensure_docker_setup_prerequisites(base_url: str) -> int:
+    reachability_base_url = (
+        os.environ.get("AI_OBSIDIAN_DMR_CONTAINER_BASE_URL", "http://host.docker.internal:12434/engines/v1")
+        if os.environ.get("AI_OBSIDIAN_IN_CONTAINER") == "1"
+        else base_url
+    )
+    status = docker_status(base_url=reachability_base_url)
+    if not status.docker_cli:
+        print(status.error)
+        return 1
+    if not status.daemon_running:
+        print(status.error or "Docker daemon is not running. Start Docker Desktop.")
+        return 1
+    if not status.model_runner_running:
+        print(status.error or "Docker Model Runner is not enabled.")
+        print("Enable Docker Model Runner in Docker Desktop, then retry.")
+        return 1
+    if os.environ.get("AI_OBSIDIAN_SKIP_OBSIDIAN_APP_CHECK") == "1":
+        return 0
+    if not obsidian_app_available():
+        print("Obsidian.app was not found. Install Obsidian before applying Docker mode setup.")
+        return 1
+    return 0
+
+
+def obsidian_app_available() -> bool:
+    return (
+        Path("/Applications/Obsidian.app").exists()
+        or (Path.home() / "Applications" / "Obsidian.app").exists()
+        or check_prerequisites().obsidian_installed
+    )
+
+
+def dmr_client_base_url(config: dict[str, Any]) -> str:
+    if os.environ.get("AI_OBSIDIAN_IN_CONTAINER") == "1":
+        return os.environ.get("AI_OBSIDIAN_DMR_CONTAINER_BASE_URL", "http://host.docker.internal:12434/engines/v1")
+    return config.get("omlx", {}).get("base_url", DEFAULT_DMR_BASE_URL)
+
+
+def docker_reachability_base_url(config: dict[str, Any], fallback: str = DEFAULT_DMR_BASE_URL) -> str:
+    if os.environ.get("AI_OBSIDIAN_IN_CONTAINER") == "1":
+        return os.environ.get("AI_OBSIDIAN_DMR_CONTAINER_BASE_URL", "http://host.docker.internal:12434/engines/v1")
+    return fallback or config.get("omlx", {}).get("base_url", DEFAULT_DMR_BASE_URL)
 
 
 def downloaded_model_to_json(model: DownloadedModel) -> dict[str, Any]:
@@ -1139,23 +1525,30 @@ def collect_health() -> dict[str, Any]:
         "soul": {},
         "plugins": {},
         "external_engines": external_engine_statuses(),
+        "docker": {},
     }
 
     omlx = config.get("omlx", {})
+    mode = runtime_mode(config)
+    default_base_url = DEFAULT_DMR_BASE_URL if mode == RUNTIME_DOCKER_MODEL_RUNNER else DEFAULT_OMLX_BASE_URL
     client = OmlxClient(
-        base_url=omlx.get("base_url", DEFAULT_OMLX_BASE_URL),
+        base_url=dmr_client_base_url(config) if mode == RUNTIME_DOCKER_MODEL_RUNNER else omlx.get("base_url", default_base_url),
         api_key=omlx.get("api_key") or os.environ.get("OMLX_API_KEY"),
     )
     served_models, error = list_models_if_reachable(client)
     selected = omlx.get("selected_model")
     health["omlx"] = {
-        "base_url": omlx.get("base_url", DEFAULT_OMLX_BASE_URL),
+        "base_url": omlx.get("base_url", default_base_url),
         "configured_model": selected,
         "reachable": served_models is not None,
         "served_models": served_models or [],
         "error": str(error) if error else None,
         "model_visible": bool(served_models and selected and any(model_matches(selected, model) for model in served_models)),
     }
+    health["runtime"] = {"mode": mode}
+    health["docker"] = docker_status(
+        base_url=docker_reachability_base_url(config, omlx.get("base_url", DEFAULT_DMR_BASE_URL))
+    ).to_json()
 
     vault_name = config.get("default_vault")
     vault_path = resolve_vault(vault_name) if vault_name else None
@@ -1194,11 +1587,16 @@ def collect_health() -> dict[str, Any]:
                 ],
             }
 
+    runtime_ready = (
+        bool(health["docker"].get("ok"))
+        if mode == RUNTIME_DOCKER_MODEL_RUNNER
+        else bool(health["system"]["homebrew"])
+    )
     health["ok"] = (
         health["system"]["architecture_ok"]
         and health["system"]["macos_ok"]
-        and bool(health["system"]["homebrew"])
         and health["system"]["python_ok"]
+        and runtime_ready
         and health["omlx"].get("reachable")
         and health["omlx"].get("model_visible")
         and health["vault"].get("ok")
@@ -1229,6 +1627,19 @@ def print_external_engine_status(health: dict[str, Any]) -> None:
         marker = "available" if status.get("available") else "not configured"
         detail = status.get("executable") or status.get("detail")
         print(f"- {engine}: {detail} [{marker}]")
+
+
+def print_docker_health_summary(health: dict[str, Any]) -> None:
+    docker = health.get("docker", {})
+    if not docker:
+        return
+    mode = health.get("runtime", {}).get("mode", RUNTIME_NATIVE_OMLX)
+    marker = "ok" if docker.get("ok") else "needs attention"
+    print(f"Docker runtime: {mode}")
+    print(f"- Docker CLI: {docker.get('docker_cli') or 'missing'}")
+    print(f"- Docker Model Runner: {marker}")
+    if docker.get("error"):
+        print(f"  - {docker['error']}")
 
 
 def print_soul_health_summary(health: dict[str, Any]) -> None:
@@ -1424,6 +1835,13 @@ def choose_model_id_interactively() -> str | None:
     options: list[tuple[str, str]] = []
     seen: set[str] = set()
 
+    if is_docker_runtime(config):
+        for model in docker_model_list():
+            if model in seen:
+                continue
+            seen.add(model)
+            options.append((model, f"{model} | Docker Model Runner"))
+
     for model in discover_downloaded_models():
         if model.format != "MLX":
             continue
@@ -1502,6 +1920,12 @@ def cmd_models(args: argparse.Namespace) -> int:
         if not args.model:
             return cmd_models_download_interactive()
         config = load_config()
+        if is_docker_runtime(config):
+            if not is_docker_model_id(args.model):
+                print("Refusing to pull a native oMLX/MLX repo id as a Docker model.")
+                print(docker_model_runner_suggestion_for_model(args.model) or "Choose a Docker model such as `ai/smollm2`.")
+                return 1
+            return docker_model_pull(args.model)
         model_dir = Path(config.get("omlx", {}).get("model_dir") or Path.home() / ".omlx" / "models")
         return download_model_repo(args.model, model_dir)
     if args.action != "list":
@@ -1616,6 +2040,8 @@ def discover_downloaded_models() -> list[DownloadedModel]:
 def cmd_models_status() -> int:
     config = load_config()
     omlx = config.get("omlx", {})
+    if is_docker_runtime(config):
+        return cmd_docker_models_status(config)
     model_dir = Path(omlx.get("model_dir") or Path.home() / ".omlx" / "models")
     selected = omlx.get("selected_model")
     base_url = omlx.get("base_url", DEFAULT_OMLX_BASE_URL)
@@ -1671,9 +2097,56 @@ def cmd_models_status() -> int:
     return 0
 
 
+def cmd_docker_models_status(config: dict[str, Any]) -> int:
+    omlx = config.get("omlx", {})
+    selected = omlx.get("selected_model")
+    base_url = omlx.get("base_url", DEFAULT_DMR_BASE_URL)
+    client_base_url = dmr_client_base_url(config)
+    status = docker_status(base_url=client_base_url)
+    print(f"Docker Model Runner API: {base_url}")
+    if client_base_url != base_url:
+        print(f"Container access URL: {client_base_url}")
+    print(f"Configured model: {selected or '(not set)'}")
+    if not status.ok:
+        print(f"Docker Model Runner: {status.error or 'not ready'}")
+        return 1
+
+    print("Docker Model Runner pulled models:")
+    if status.models:
+        for model in status.models:
+            marker = " [configured]" if model_matches(selected, model) else ""
+            print(f"- {model}{marker}")
+    else:
+        print("- none")
+
+    client = OmlxClient(base_url=client_base_url, api_key=None)
+    served_models, error = list_models_if_reachable(client)
+    if served_models is None:
+        print(f"Docker Model Runner API: {error}")
+        return 1
+    print("Docker Model Runner /models:")
+    for model in served_models:
+        marker = " [configured]" if model_matches(selected, model) else ""
+        print(f"- {model}{marker}")
+    if selected and not any(model_matches(selected, model) for model in status.models + served_models):
+        print("Warning: configured model does not match any pulled or served Docker Model Runner model.")
+        return 1
+    return 0
+
+
 def cmd_models_use(model: str) -> int:
     config = load_config()
     omlx = config.get("omlx", {})
+    if is_docker_runtime(config):
+        known_ids = docker_model_list()
+        if known_ids and not any(model_matches(model, known) for known in known_ids):
+            print("Warning: this model does not match any Docker Model Runner model id.")
+        config.setdefault("omlx", {})["selected_model"] = model
+        config.setdefault("omlx", {})["base_url"] = omlx.get("base_url", DEFAULT_DMR_BASE_URL)
+        config.setdefault("runtime", {})["mode"] = RUNTIME_DOCKER_MODEL_RUNNER
+        save_config(config)
+        print(f"Configured default Docker Model Runner model: {model}")
+        return 0
     model_dir = Path(omlx.get("model_dir") or Path.home() / ".omlx" / "models")
     local_models = discover_local_models(model_dir)
     served_models: list[str] = []
@@ -1835,9 +2308,23 @@ def format_bytes(size: int) -> str:
 def model_matches(configured: str | None, actual: str) -> bool:
     if not configured:
         return False
-    configured_tail = configured.rsplit("/", maxsplit=1)[-1]
-    actual_tail = actual.rsplit("/", maxsplit=1)[-1]
-    return configured == actual or configured_tail == actual_tail
+    configured_normalized = normalize_model_match_id(configured)
+    actual_normalized = normalize_model_match_id(actual)
+    configured_tail = configured_normalized.rsplit("/", maxsplit=1)[-1]
+    actual_tail = actual_normalized.rsplit("/", maxsplit=1)[-1]
+    return (
+        configured == actual
+        or configured_normalized == actual_normalized
+        or configured_tail == actual_tail
+        or configured_tail.split(":", maxsplit=1)[0] == actual_tail.split(":", maxsplit=1)[0]
+    )
+
+
+def normalize_model_match_id(model_id: str) -> str:
+    normalized = model_id.removeprefix("docker.io/")
+    if normalized.endswith(":latest"):
+        normalized = normalized[: -len(":latest")]
+    return normalized
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
@@ -1857,8 +2344,11 @@ def cmd_chat(args: argparse.Namespace) -> int:
     config = load_config()
     engine = args.engine or config.get("chat", {}).get("default_engine", "builtin")
     model = args.model or config.get("omlx", {}).get("selected_model")
-    base_url = args.base_url or config.get("omlx", {}).get("base_url", DEFAULT_OMLX_BASE_URL)
-    api_key = args.api_key or config.get("omlx", {}).get("api_key") or os.environ.get("OMLX_API_KEY")
+    default_base_url = DEFAULT_DMR_BASE_URL if is_docker_runtime(config) else DEFAULT_OMLX_BASE_URL
+    base_url = args.base_url or config.get("omlx", {}).get("base_url", default_base_url)
+    if is_docker_runtime(config) and not args.base_url:
+        base_url = dmr_client_base_url(config)
+    api_key = None if is_docker_runtime(config) else (args.api_key or config.get("omlx", {}).get("api_key") or os.environ.get("OMLX_API_KEY"))
 
     if engine in {"hermes", "claude"}:
         return run_external_chat(
@@ -1886,15 +2376,18 @@ def cmd_chat(args: argparse.Namespace) -> int:
 def print_omlx_status() -> None:
     config = load_config()
     omlx = config.get("omlx", {})
+    label = "Docker Model Runner API" if is_docker_runtime(config) else "oMLX API"
+    default_base_url = DEFAULT_DMR_BASE_URL if is_docker_runtime(config) else DEFAULT_OMLX_BASE_URL
+    base_url = omlx.get("base_url", default_base_url)
     client = OmlxClient(
-        base_url=omlx.get("base_url", DEFAULT_OMLX_BASE_URL),
+        base_url=dmr_client_base_url(config) if is_docker_runtime(config) else base_url,
         api_key=omlx.get("api_key") or os.environ.get("OMLX_API_KEY"),
     )
     try:
         model_count = len(client.list_models())
-        print(f"oMLX API: reachable at {DEFAULT_OMLX_BASE_URL} [{model_count} models]")
+        print(f"{label}: reachable at {base_url} [{model_count} models]")
     except OmlxError as exc:
-        print(f"oMLX API: {exc} [needs attention]")
+        print(f"{label}: {exc} [needs attention]")
 
 
 def load_config() -> dict[str, Any]:
@@ -1913,6 +2406,8 @@ def save_config(config: dict[str, Any]) -> None:
 
 
 def config_path() -> Path:
+    if os.environ.get("AI_OBSIDIAN_CONFIG_DIR"):
+        return Path(os.environ["AI_OBSIDIAN_CONFIG_DIR"]).expanduser() / "config.json"
     return Path.home() / ".ai-obsidian" / "config.json"
 
 

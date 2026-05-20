@@ -3,6 +3,10 @@ import Foundation
 import SwiftUI
 
 struct SetupProfile: Codable {
+    struct Runtime: Codable {
+        var mode: String
+    }
+
     struct Omlx: Codable {
         var mode: String
         var api_key: String
@@ -30,6 +34,7 @@ struct SetupProfile: Codable {
         var open_obsidian: Bool
     }
 
+    var runtime: Runtime
     var omlx: Omlx
     var vault: Vault
     var chat: Chat
@@ -52,6 +57,7 @@ final class InstallerState: ObservableObject {
     @Published var vaultPath = "\(NSHomeDirectory())/Documents/Obsidian/Main"
     @Published var modelDir = "\(NSHomeDirectory())/.omlx/models"
     @Published var selectedModel = "mlx-community/Qwen3-1.7B-4bit"
+    @Published var runtimeMode = "native-omlx"
     @Published var omlxMode = "service"
     @Published var apiKey = ""
     @Published var chatEngine = "builtin"
@@ -108,7 +114,7 @@ final class InstallerState: ObservableObject {
     var canApply: Bool {
         !vaultPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !modelDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (runtimeMode == "docker-model-runner" || !modelDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
     var stepTitle: String {
@@ -219,7 +225,10 @@ final class InstallerState: ObservableObject {
             fail("Install the CLI before loading model suggestions.")
             return
         }
-        let command = [cliPath, "setup", "models", "--json", "--model-dir", modelDir]
+        var command = [cliPath, "setup", "models", "--json", "--runtime", runtimeMode]
+        if runtimeMode == "native-omlx" {
+            command += ["--model-dir", modelDir]
+        }
         runCapturingJSON(executable: command[0], arguments: Array(command.dropFirst())) { data in
             guard
                 let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -227,11 +236,14 @@ final class InstallerState: ObservableObject {
                 self.appendLog("Could not parse model suggestions.")
                 return
             }
+            let dockerRows = json["docker_models"] as? [[String: Any]] ?? []
             let downloadedRows = json["downloaded"] as? [[String: Any]] ?? []
             let downloaded = Self.uniqueModelIds(
-                downloadedRows
-                    .filter { ($0["format"] as? String) == "MLX" }
-                    .compactMap { $0["id"] as? String }
+                self.runtimeMode == "docker-model-runner"
+                    ? dockerRows.compactMap { $0["id"] as? String }
+                    : downloadedRows
+                        .filter { ($0["format"] as? String) == "MLX" }
+                        .compactMap { $0["id"] as? String }
             )
             let remote = (json["remote"] as? [[String: Any]] ?? []).compactMap { $0["repo_id"] as? String }
             let otherLocalCount = max(0, downloadedRows.count - downloaded.count)
@@ -243,7 +255,11 @@ final class InstallerState: ObservableObject {
             self.runState = "Complete"
             self.lastError = ""
             self.statusText = "Model choices loaded."
-            self.appendLog("Loaded \(downloaded.count) direct MLX models, ignored \(otherLocalCount) Ollama/GGUF/duplicate local entries, and loaded \(remote.count) remote suggestions.")
+            if self.runtimeMode == "docker-model-runner" {
+                self.appendLog("Loaded \(downloaded.count) pulled Docker Model Runner models and \(remote.count) Docker suggestions.")
+            } else {
+                self.appendLog("Loaded \(downloaded.count) direct MLX models, ignored \(otherLocalCount) Ollama/GGUF/duplicate local entries, and loaded \(remote.count) remote suggestions.")
+            }
         }
     }
 
@@ -269,7 +285,13 @@ final class InstallerState: ObservableObject {
         }
         do {
             let profile = SetupProfile(
-                omlx: .init(mode: omlxMode, api_key: apiKey, model_dir: modelDir, selected_model: selectedModel),
+                runtime: .init(mode: runtimeMode),
+                omlx: .init(
+                    mode: runtimeMode == "docker-model-runner" ? "docker-model-runner" : omlxMode,
+                    api_key: runtimeMode == "docker-model-runner" ? "" : apiKey,
+                    model_dir: runtimeMode == "docker-model-runner" ? "" : modelDir,
+                    selected_model: selectedModel
+                ),
                 vault: .init(mode: vaultMode, name: vaultName, path: vaultPath),
                 chat: .init(default_engine: chatEngine),
                 plugins: .init(install_hub: installHub, install_companion: installCompanion),
@@ -569,7 +591,7 @@ struct WelcomeView: View {
 
     var body: some View {
         Form {
-            Text("Start here. Install the CLI first, then install the stack dependencies: Homebrew, Obsidian, oMLX, Hugging Face CLI, ffmpeg, and mlx-whisper.")
+            Text("Start here. Install the CLI first. Native oMLX mode can install the full Homebrew stack; Docker mode only needs Docker Desktop and Obsidian.")
             Text(state.statusText).foregroundStyle(.secondary)
             TextField("Install directory", text: $state.installDir)
             TextField("Binary directory", text: $state.binDir)
@@ -612,17 +634,26 @@ struct ModelView: View {
 
     var body: some View {
         Form {
-            Text("Downloaded MLX models are listed first. If nothing appears, enter a Hugging Face model id manually or load remote suggestions.")
+            Text("Use native oMLX for the full local MLX flow, or Docker Model Runner to avoid installing host oMLX.")
                 .foregroundStyle(.secondary)
-            Picker("oMLX mode", selection: $state.omlxMode) {
-                Text("Homebrew service").tag("service")
-                Text("Manual").tag("manual")
-                Text("Menu bar app").tag("menubar")
+            Picker("Runtime", selection: $state.runtimeMode) {
+                Text("Native oMLX").tag("native-omlx")
+                Text("Docker Model Runner").tag("docker-model-runner")
             }
-            SecureField("oMLX API key (optional)", text: $state.apiKey)
+            if state.runtimeMode == "native-omlx" {
+                Picker("oMLX mode", selection: $state.omlxMode) {
+                    Text("Homebrew service").tag("service")
+                    Text("Manual").tag("manual")
+                    Text("Menu bar app").tag("menubar")
+                }
+                SecureField("oMLX API key (optional)", text: $state.apiKey)
+            } else {
+                Text("Docker mode uses Docker Model Runner at http://localhost:12434/engines/v1 and does not need a local oMLX API key.")
+                    .foregroundStyle(.secondary)
+            }
             TextField("Selected model id", text: $state.selectedModel)
             if !state.downloadedModels.isEmpty {
-                Picker("Downloaded models", selection: $state.selectedModel) {
+                Picker(state.runtimeMode == "docker-model-runner" ? "Pulled Docker models" : "Downloaded models", selection: $state.selectedModel) {
                     ForEach(state.downloadedModels, id: \.self) { Text($0).tag($0) }
                 }
             }
